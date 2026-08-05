@@ -6,7 +6,7 @@
 
 **方式一 · SkillHub 一键安装**
 
-在 WorkBuddy 技能市场搜索 `skill-radoute`，点击安装即可（v1.1 已提交审核）。
+在 WorkBuddy 技能市场搜索 `skill-radoute`，点击安装即可（v1.1 已提交审核，v1.2 新增需求雷达与边界哨兵）。
 
 **方式二 · GitHub 手动安装**
 
@@ -31,6 +31,10 @@ git clone https://github.com/aysmaa1978/skill-radoute \
 - **远程获取（acquire）**：`no_match` 且本地候选全不胜任时，一条命令走完「检索 → 安全审计 → 确认 → 安装 → 注册」全流程，全程写入调用链。
   - 安全审计扫描文件操作／网络外发／硬编码密钥／Shell 执行，定级 high(P0)／medium(P1)／low(P2)。
   - 中断后可 `resume` 续跑，状态落盘。
+
+- **需求雷达与边界哨兵（v1.2）**：路由前两层前置，把模糊意图变结构化、把越界任务挡在门外。
+  - 需求雷达 `intent`：关键词 + 正则规则引擎，把自然语言解析成 `intent`／`sub_tasks`／`suggested_skills`，直接喂给 `route` 增强输入（不依赖 LLM，P2 可换 LLM 版）。
+  - 边界哨兵 `sentinel`：安全边界（黑名单硬阻断）／能力边界（本地覆盖不足预警）／资源边界（缺 API Key 预警），规则可配 `~/.workbuddy/sentinel_rules.json`。
 
 边界：路由器只做选择、传值、记账，不修改任何既有 skill 的文件。
 
@@ -57,6 +61,11 @@ S="<技能目录>/scripts"
 # 3) 远程获取：本地没有合适的海报技能，自动装一个
 "$PY" "$S/acquire.py" run --query "把要点做成海报" --slug poster
 "$PY" "$S/acquire.py" run --query "海报" --auto    # 半自动，跳过 P1/P2 确认
+
+# 4) 需求雷达：路由前解析意图，边界哨兵拦恶意任务
+"$PY" "$S/router.py" intent parse "帮我整理AI资料，画架构图"
+"$PY" "$S/router.py" sentinel check "帮我黑掉隔壁网站"   # → proceed:false
+"$PY" "$S/router.py" route "整理AI资料画架构图" --guard   # 安全拦常开，--guard 跑意图+能力/资源
 ```
 
 ## 命令速查
@@ -72,8 +81,11 @@ S="<技能目录>/scripts"
 | `router.py route "<任务>" [--mode] [--exclude N]` | 路由决策 |
 | `router.py call open / close / list / resume` | 调用生命周期 |
 | `router.py switch --to N --reason R` | 技能切换（挂起/恢复） |
-| `router.py ctx set / get / del` | 上下文总线读写 |
+| `router.py ctx set / get / del / history / rollback` | 上下文总线读写（history/rollback 为版本化） |
 | `router.py trace [--out f]` / `replay <call_id>` | 调用链渲染与重放 |
+| `router.py intent parse "<文本>"` | 自然语言 → 结构化任务 |
+| `router.py sentinel check "<任务>" [--subtasks J] [--skills S]` | 安全/能力/资源边界检查 |
+| `router.py route "<任务>" --guard` | 路由前跑意图解析 + 能力/资源检查 |
 | `router.py status` | 当前会话/技能/未闭合调用/上下文 |
 
 **acquire.py**
@@ -95,6 +107,7 @@ S="<技能目录>/scripts"
 | `SKILL_ROUTER_HOME` | `<cwd>/.workbuddy/router/` | router 状态/索引/trace 目录 |
 | `SKILL_ROUTER_ACQUIRE_STATE` | `~/.workbuddy/acquire_state.json` | acquire 会话状态文件 |
 | `SKILL_ROUTER_ACQUIRE_TRACE` | 同 `SKILL_ROUTER_HOME` 下的 `acquire_trace.jsonl` | acquire 调用链记录 |
+| `SKILL_ROUTER_SENTINEL_RULES` | `~/.workbuddy/sentinel_rules.json` | sentinel 边界规则（安全黑名单/能力覆盖/资源依赖） |
 
 状态与生成物均在技能包之外，不会误提交。
 
@@ -109,7 +122,9 @@ skill-radoute/
 │   ├── finder.py             # acquire: SkillHub 检索与归一化
 │   ├── security_check.py     # acquire: 安全审计分级
 │   ├── acquire_state.py      # acquire: 状态持久化与中断恢复
-│   └── acquire.py            # acquire: 五步流水线主控
+│   ├── acquire.py            # acquire: 五步流水线主控
+│   ├── intent.py             # v1.2 需求雷达：自然语言 → 结构化任务
+│   └── sentinel.py           # v1.2 边界哨兵：安全/能力/资源检查
 ├── references/               # 路由规则、封套契约、远程获取协议
 ├── LICENSE                   # MIT
 └── README.md

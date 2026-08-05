@@ -23,6 +23,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import registry  # noqa: E402
+import intent  # noqa: E402
+import sentinel  # noqa: E402
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -250,6 +252,27 @@ def cmd_route(a) -> int:
     sid = require_sid(a.session)
     s = load_session(sid)
     mode = a.mode or s.get("mode", "auto")
+
+    # --- pre-route guard: security boundary is always checked (hard block) ---
+    sec = sentinel.check(a.task)
+    if not sec["proceed"]:
+        trace_append(sid, "route_blocked", task=a.task, reason=sec["reason"],
+                     matched=sec.get("matched"), suggestion=sec.get("suggestion"))
+        emit({"proceed": False, "reason": sec["reason"],
+              "suggestion": sec.get("suggestion")})
+        return 2
+
+    # --- optional: intent parse + capability/resource check under --guard ---
+    intent_spec = None
+    if a.guard:
+        intent_spec = intent.parse(a.task)
+        trace_append(sid, "route_intent", task=a.task, **intent_spec)
+        avail = [r["name"] for r in registry.scan()["skills"]]
+        cov = sentinel.check(a.task, sub_tasks=intent_spec["sub_tasks"],
+                             available_skills=avail)
+        for w in cov.get("warnings", []):
+            trace_append(sid, "route_warning", task=a.task, warning=w)
+
     cands = registry.search(a.task, top=a.top)
     exclude = set(a.exclude or [])
     cands = [c for c in cands if c["name"] not in exclude]
@@ -282,6 +305,7 @@ def cmd_route(a) -> int:
     emit({
         "session": sid, "decision": decision, "reason": reason,
         "chosen": chosen, "candidates": cands, "trace_seq": ev["seq"],
+        "intent": intent_spec,
         "note": "分数只是词法先验，最终由模型做语义判定；分数接近时优先看 why 与 description",
     })
     return 0
@@ -684,6 +708,34 @@ def cmd_acquire_log(a) -> int:
     return 0
 
 
+# ------------------------------------------------------------------ P1 bridges
+
+def cmd_intent_parse(a) -> int:
+    r = intent.parse(a.text)
+    if a.json:
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(r, ensure_ascii=False))
+    return 0
+
+
+def cmd_sentinel_check(a) -> int:
+    sub_tasks = None
+    if a.subtasks:
+        try:
+            sub_tasks = json.loads(a.subtasks)
+        except Exception as e:
+            emit({"error": f"subtasks 解析失败: {e}"})
+            return 1
+    skills = [x.strip() for x in a.skills.split(",")] if a.skills else None
+    r = sentinel.check(a.text, sub_tasks=sub_tasks, available_skills=skills)
+    if a.json:
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(r, ensure_ascii=False))
+    return 0 if r["proceed"] else 2
+
+
 # ------------------------------------------------------------------------- CLI
 
 def build_parser() -> argparse.ArgumentParser:
@@ -716,7 +768,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threshold", type=float, default=AUTO_THRESHOLD)
     p.add_argument("--margin", type=float, default=AUTO_MARGIN)
     p.add_argument("--exclude", action="append", help="skill name to skip (repeatable)")
+    p.add_argument("--guard", action="store_true",
+                   help="路由前额外跑意图解析 + 能力/资源边界检查（安全边界始终检查）")
     p.set_defaults(fn=cmd_route)
+
+    # --- v1.2 P1: intent (需求雷达) / sentinel (边界哨兵) ---
+    ip = sub.add_parser("intent", help="规则引擎：自然语言 -> 结构化任务")
+    isp = ip.add_subparsers(dest="sub", required=True)
+    ipp = isp.add_parser("parse")
+    ipp.add_argument("text")
+    ipp.add_argument("--json", action="store_true")
+    ipp.set_defaults(fn=cmd_intent_parse)
+
+    sp = sub.add_parser("sentinel", help="路由前边界哨兵（安全/能力/资源）")
+    ssp = sp.add_subparsers(dest="sub", required=True)
+    spp = ssp.add_parser("check")
+    spp.add_argument("text")
+    spp.add_argument("--subtasks", help="JSON：intent.sub_tasks，用于能力覆盖判定")
+    spp.add_argument("--skills", help="逗号分隔的本地技能名，用于能力覆盖判定")
+    spp.add_argument("--json", action="store_true")
+    spp.set_defaults(fn=cmd_sentinel_check)
 
     call = sub.add_parser("call").add_subparsers(dest="sub", required=True)
     p = call.add_parser("open")

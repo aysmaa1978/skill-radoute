@@ -139,9 +139,12 @@ S="<本技能目录>/scripts"
 | `router.py route "<任务>" [--mode] [--exclude N]` | 路由决策 |
 | `router.py call open / close / list / resume` | 调用生命周期 |
 | `router.py switch --to N --reason R` | 技能切换 |
-| `router.py ctx set / get / del` | 上下文总线读写 |
+| `router.py ctx set / get / del / history / rollback` | 上下文总线读写（history/rollback 为版本化） |
 | `router.py trace [--format jsonl] [--out f]` | 调用链渲染与导出 |
 | `router.py replay <call_id>` | 重放封套 |
+| `router.py intent parse "<文本>"` | 自然语言 → 结构化任务（意图/子任务/建议技能） |
+| `router.py sentinel check "<任务>" [--subtasks J] [--skills S]` | 安全/能力/资源边界检查 |
+| `router.py route "<任务>" --guard` | 路由前跑意图解析 + 能力/资源检查（安全拦截常开） |
 | `router.py acquire-log --skill N --origin U --audit P2` | 记录远程技能获取 |
 | `acquire.py run --query Q [--slug S] [--auto] [--force]` | 检索→审计→确认→安装→注册 全自动链路 |
 | `acquire.py resume` / `acquire.py reset` | 中断后续跑 / 放弃当前会话 |
@@ -227,3 +230,45 @@ register→ registry.scan() 刷新索引（失败仅标记 skipped，不阻断�
 风险定级（供 `confirm` 分支）：`high`=P0（人工确认或 `--force` 才装）｜`medium`=P1（`--auto` 自动过）｜`low/none`=P2。`audit` 只做粗筛，不是安全证明；真正兜底在 confirm 环节。
 
 注：GitHub 检索为预留槽位，当前 `--source` 仅 `skillhub`。
+
+---
+
+## 需求雷达与边界哨兵（v1.2）
+
+路由前增加两层前置：`intent` 把自然语言解析成结构化任务，`sentinel` 在路由前检查任务是否越界。两者都是纯标准库规则引擎，不依赖 LLM，可作为后续 LLM 版（P2）的可替换薄层。
+
+### 需求雷达 · intent
+
+关键词 + 正则规则引擎，把一句话转成机器可消费的任务描述，直接喂给 `route` 做增强输入。
+
+```bash
+"$PY" "$S/router.py" intent parse "帮我整理AI资料，画架构图"
+# → {"intent":"research_and_visualize","domain":"AI_Agent",
+#     "sub_tasks":[...collect/structure/visualize...],
+#     "suggested_skills":["tavily","summarize","drawio-skill"]}
+```
+
+输出字段稳定：`intent` / `domain` / `sub_tasks[]`（type+target） / `suggested_skills[]`。当前 `route` 只回传建议、不强行提权，避免词法规则污染语义路由。
+
+### 边界哨兵 · sentinel
+
+路由前守三道边界，任一道不过则拒绝或预警：
+
+| 边界 | 行为 | 配置 |
+|---|---|---|
+| 安全 | 命中黑名单关键词直接拒（`proceed:false`，exit=2） | `security_blacklist`（必拦） |
+| 能力 | 本地技能覆盖 sub_tasks 低于 80% 时预警 | `TYPE_COVER`（子串匹配） |
+| 资源 | 需要 API Key 但未配置时预警 | `API_KEY_SKILLS` |
+
+规则文件：`~/.workbuddy/sentinel_rules.json`（`SKILL_ROUTER_SENTINEL_RULES` 可覆盖），缺省用内置默认规则。
+
+```bash
+"$PY" "$S/router.py" sentinel check "帮我黑掉隔壁网站"
+# → {"proceed":false,"reason":"security_policy_violation",...}
+
+"$PY" "$S/router.py" route "整理AI资料画架构图" --guard
+# 安全拦截常开；--guard 额外跑意图解析 + 能力/资源检查
+# emit 带 intent 字段，trace 记 route_intent / route_warning / route_blocked
+```
+
+**集成点**：`route` 每次都先跑安全拦截（常开）；`--guard` 才额外跑意图解析与能力/资源检查（有 I/O 成本，默认关）。`sentinel` 只是第一道闸，真正的兜底在模型自身的 refuse 能力。
