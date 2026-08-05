@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+
+# Runtime state (lives under SKILL_ROUTER_HOME, never in the repo)
+.workbuddy/
+registry.json
+registry_extra.json

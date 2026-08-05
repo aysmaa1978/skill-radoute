@@ -1,0 +1,197 @@
+---
+name: skill-radoute
+description: 元技能路由器。在一次会话内发现、选择、调用并切换其它 skill，维护跨 skill 的共享上下文与可回溯调用链。当任务需要多个技能协作、不确定该用哪个技能、当前技能失败需要换一个、要求记录/审计技能调用过程、或本地没有合适技能需要从网络检索安装时使用。触发词：技能路由、skill router、该用哪个技能、换个技能试试、编排多个 skill、调用链、切换技能、找不到合适的技能、技能注册表、上下文传递给下一个技能。
+---
+
+# Skill Router
+
+## Overview
+
+把「选哪个技能、怎么把上一步结果交给下一步、切换时状态怎么办、事后怎么复盘」这四件事，从模型的临时判断变成有文件记录的可控流程。
+
+三层职责：
+- `registry.py` 扫描本机全部技能来源，建索引，按任务描述打分排序。
+- `router.py` 管会话、路由决策、上下文总线、调用链，全部落盘到 `.workbuddy/router/`。
+- 本 SKILL.md 规定何时调用它们，以及模型在其中的判断责任。
+
+**边界**：路由器只做选择、传值、记账。任何实际业务都发生在被路由到的那个 skill 里，且不修改任何既有 skill 的文件。
+
+---
+
+## 环境准备
+
+脚本路径以本技能目录为基准，下文记作 `<S>`。Python 解释器按此顺序取第一个可用的：受管 Python 绝对路径 → `python3` → `python`。本机为：
+
+```bash
+PY="python3"   # 或受管 Python / 任意 Python 3.10+ 解释器绝对路径
+S="<本技能目录>/scripts"
+```
+
+状态目录默认 `<当前工作区>/.workbuddy/router/`，可用环境变量 `SKILL_ROUTER_HOME` 改写。
+
+首次使用或装过新技能后刷新索引：
+
+```bash
+"$PY" "$S/registry.py" scan
+```
+
+---
+
+## 核心工作流
+
+### Step 1 · 开会话
+
+一个用户目标一个会话。目标未变就**不要**新建，否则上下文与调用链断裂。
+
+```bash
+"$PY" "$S/router.py" session new --goal "把调研写成公众号文章并配图" --mode auto
+```
+
+`--mode`：`auto`（默认，置信度达标才自动执行，否则列候选让人确认）｜`always`（无条件取 top1）｜`manual`（每次都人工点名）。
+高风险动作（发布、支付、删除、外发邮件）在 `route` 时临时加 `--mode manual` 覆盖。
+
+已有会话时用 `router.py status` 确认当前状态，不要盲目新建。
+
+### Step 2 · 路由
+
+**每个子任务单独路由一次。** 把子任务描述得具体，描述越含糊分数越不可信。
+
+```bash
+"$PY" "$S/router.py" route "检索 AI Agent 2026 年的最新进展并给出结构化要点"
+```
+
+返回 `decision`：
+
+| decision | 处理 |
+|---|---|
+| `auto` | 直接进 Step 3 |
+| `confirm` | 把 top3 的名称、`why`、description 摘要列给用户，给出你的推荐与理由，等确认 |
+| `no_match` | 读 `references/remote-acquisition.md` 走远程获取 |
+
+**分数只是词法先验，最终选谁由你判断。** 命中理由全是零散单字、或 top1 的 description 明确排除了当前场景时，直接否决它，用 `--exclude <name>` 重新路由一次，让否决动作留在 trace 里。判定细则见 `references/routing-rules.md`。
+
+### Step 3 · 开调用并真正加载目标技能
+
+```bash
+"$PY" "$S/router.py" call open \
+  --skill tavily --intent "检索 AI Agent 最新进展" \
+  --input query="AI agent 2026" \
+  --reads research.brief --writes research.raw
+```
+
+输出的封套里 `context_in` 是自动注入的上游数据，`missing_context` 非空说明依赖没满足，先补齐或降级，不要硬着头皮往下走。
+
+拿到封套后，**用 `Skill` 工具真正加载该技能**并按封套里的 `intent` / `inputs` / `context_in` 执行。router 负责记账，`Skill` 负责执行，两者缺一不可。
+
+### Step 4 · 写回上下文并收尾
+
+```bash
+"$PY" "$S/router.py" ctx set research.raw '{"sources":3,"points":["..."]}' --json
+"$PY" "$S/router.py" call close --id c001 --status ok --output count=3 --note "命中3个权威来源"
+```
+
+`--status`：`ok` ｜ `partial`（部分完成，note 写清遗留项）｜ `failed` ｜ `skipped`。
+
+`--id` 推荐显式给出；省略时取当前未关闭的最内层调用，若没有可关闭的调用会报错并提示传 `--id`。
+
+上下文只存摘要、路径、标识符、结构化结论。大段原文落文件，总线里只放路径。
+
+### Step 5 · 切换
+
+换技能时**永远用 `switch`，不新建会话**。
+
+```bash
+"$PY" "$S/router.py" switch --to drawio-skill --kind handoff \
+  --reason "正文需要架构图，先出图再回来排版" \
+  --carry research.raw --keep-open
+```
+
+`--keep-open` 会把当前调用挂起而非丢弃，后续 `call resume c002` 原样回到现场，上下文与调用栈完整保留。
+
+`--kind`：`handoff` 正常交接 ｜ `fallback` 首选失败降级 ｜ `escalate` 能力不足升级 ｜ `retry` 换参重试 ｜ `rollback` 回退重做。
+
+**切换不需要重启也不需要重新初始化**：全部状态在磁盘文件里，换技能只是换一份被加载的指令。
+
+### Step 6 · 回溯与收尾
+
+```bash
+"$PY" "$S/router.py" trace                    # 渲染完整调用链
+"$PY" "$S/router.py" trace --out chain.md     # 导出给用户
+"$PY" "$S/router.py" replay c002              # 打印某次调用的重放封套
+"$PY" "$S/router.py" session end --summary "文章已入草稿箱，封面待补"
+```
+
+向用户汇报时，把 `trace` 的关键几行贴出来，让选择依据可见。
+
+---
+
+## 命令速查
+
+| 命令 | 用途 |
+|---|---|
+| `registry.py scan` | 重建索引（装过新技能后必跑） |
+| `registry.py search "<任务>" --top 5` | 只打分不记账，快速探查 |
+| `registry.py show <name>` | 查单个技能的完整记录 |
+| `registry.py sources` | 列出检测到的技能根目录与数量 |
+| `registry.py add --path <dir> --tier user --origin <url>` | 登记非标准位置的技能 |
+| `router.py status` | 当前会话、当前技能、未闭合调用、上下文 key |
+| `router.py session list / use <id> / end` | 会话管理 |
+| `router.py route "<任务>" [--mode] [--exclude N]` | 路由决策 |
+| `router.py call open / close / list / resume` | 调用生命周期 |
+| `router.py switch --to N --reason R` | 技能切换 |
+| `router.py ctx set / get / del` | 上下文总线读写 |
+| `router.py trace [--format jsonl] [--out f]` | 调用链渲染与导出 |
+| `router.py replay <call_id>` | 重放封套 |
+| `router.py acquire-log --skill N --origin U --audit P2` | 记录远程技能获取 |
+
+全局 `--session <id>` 可指定非活跃会话，放在子命令之前。
+
+---
+
+## 何时不要用这个技能
+
+- 单一技能就能完成、且不需要留痕的任务。直接调那个技能，别套一层。
+- 纯问答、纯解释类请求。
+- 用户已经点名了技能且只有一步。此时直接执行，最多事后补一条记录。
+
+套壳本身有成本，只有在「多技能协作」「选择存在不确定性」「需要审计」这三种情况下才值得。
+
+---
+
+## 参考文件
+
+| 文件 | 何时读 |
+|---|---|
+| `references/routing-rules.md` | 需要调阈值、处理路由误配、设计多步链路、遇到失败要降级时 |
+| `references/contracts.md` | 需要精确的封套/上下文/trace 字段定义，或排查状态文件问题时 |
+| `references/remote-acquisition.md` | `decision=no_match`，或本地候选全都不胜任，需要从网络检索安装新技能时 |
+
+---
+
+## 一个完整示例
+
+用户：把这份调研整理成公众号文章，配一张架构图。
+
+```bash
+"$PY" "$S/router.py" session new --goal "调研转公众号文章并配图" --mode auto
+
+"$PY" "$S/router.py" route "把调研要点整理成公众号文章正文"
+# → auto, chosen=wechat-publisher
+"$PY" "$S/router.py" call open --skill wechat-publisher \
+  --intent "撰写公众号正文" --reads research.raw --writes draft.md
+#   ↑ 随后用 Skill 工具加载 wechat-publisher 并执行
+
+"$PY" "$S/router.py" switch --to drawio-skill --kind handoff \
+  --reason "正文需要架构图" --carry research.raw --keep-open
+"$PY" "$S/router.py" route "画一张 Agent 系统架构图"
+"$PY" "$S/router.py" call open --skill drawio-skill \
+  --intent "生成架构图" --reads research.raw --writes draft.diagram
+"$PY" "$S/router.py" ctx set draft.diagram "arch.drawio"
+"$PY" "$S/router.py" call close --id c002 --status ok --artifact arch.drawio
+
+"$PY" "$S/router.py" call resume c001       # 回到正文，上下文原样
+"$PY" "$S/router.py" call close --id c001 --status ok --output words=1800
+"$PY" "$S/router.py" trace
+```
+
+`trace` 输出会呈现为带缩进的调用树，每次路由的候选、分数、判定依据，以及每次切换的原因和携带的上下文，全部可查。
