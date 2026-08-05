@@ -38,4 +38,4 @@ skill-radoute/
 
 ## License
 
-待定（请在本仓库补充 LICENSE）。
+MIT — 见 [LICENSE](LICENSE)。
