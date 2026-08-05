@@ -143,6 +143,8 @@ S="<本技能目录>/scripts"
 | `router.py trace [--format jsonl] [--out f]` | 调用链渲染与导出 |
 | `router.py replay <call_id>` | 重放封套 |
 | `router.py acquire-log --skill N --origin U --audit P2` | 记录远程技能获取 |
+| `acquire.py run --query Q [--slug S] [--auto] [--force]` | 检索→审计→确认→安装→注册 全自动链路 |
+| `acquire.py resume` / `acquire.py reset` | 中断后续跑 / 放弃当前会话 |
 
 全局 `--session <id>` 可指定非活跃会话，放在子命令之前。
 
@@ -195,3 +197,33 @@ S="<本技能目录>/scripts"
 ```
 
 `trace` 输出会呈现为带缩进的调用树，每次路由的候选、分数、判定依据，以及每次切换的原因和携带的上下文，全部可查。
+
+---
+
+## 远程获取：acquire 子命令
+
+`decision=no_match` 且本地候选全不胜任时，用 `acquire.py` 走完整获取链路，全程写入与 router trace 同格式的 `acquire_trace.jsonl`（`$SKILL_ROUTER_ACQUIRE_TRACE` 可改路径）。
+
+五步流水线，每步状态落在 `~/.workbuddy/acquire_state.json`（`$SKILL_ROUTER_ACQUIRE_STATE` 可改路径），中断后可 `resume` 续跑：
+
+```
+find    → finder.search()         SkillHub 按关键词召回候选
+audit   → security_check.audit()  文件操作/网络外发/硬编码密钥/Shell执行 分级
+confirm → 人工确认，或 --auto 跳过（仅 P0 仍拒，除非 --force）
+install → 下载 zip 解压到 ~/.workbuddy/skills/<slug>（含 zip-slip 防护）
+register→ registry.scan() 刷新索引（失败仅标记 skipped，不阻断）
+```
+
+用法：
+
+```bash
+"$PY" "$S/acquire.py" run --query "把调研写成海报" --slug poster
+"$PY" "$S/acquire.py" run --query "海报" --auto          # 半自动，跳过 P1/P2 确认
+"$PY" "$S/acquire.py" run --query "海报" --auto --force  # --auto 也装 P0（高危，慎用）
+"$PY" "$S/acquire.py" resume                            # 中断后续跑，从首未完成步
+"$PY" "$S/acquire.py" reset                             # 放弃当前会话，回到空白
+```
+
+风险定级（供 `confirm` 分支）：`high`=P0（人工确认或 `--force` 才装）｜`medium`=P1（`--auto` 自动过）｜`low/none`=P2。`audit` 只做粗筛，不是安全证明；真正兜底在 confirm 环节。
+
+注：GitHub 检索为预留槽位，当前 `--source` 仅 `skillhub`。
