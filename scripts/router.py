@@ -366,18 +366,12 @@ def cmd_call_close(a) -> int:
         ctx = load_ctx(sid)
         slots = ctx.setdefault("slots", {})
         for k, v in outs.items():
-            prev = slots.get(k)
-            slots[k] = {
-                "value": v,
-                "type": "text",
-                "written_by": calls[cid]["skill"],
-                "call_id": cid,
-                "ts": now_iso(),
-                "rev": (prev or {}).get("rev", 0) + 1,
-            }
+            slots[k] = _push_version(slots.get(k, {}), v, calls[cid]["skill"],
+                                     cid, "text", now_iso())
+            trace_append(sid, "ctx_write", key=k, rev=slots[k]["rev"],
+                         written_by=calls[cid]["skill"], call_id=cid,
+                         preview=str(v)[:200])
         save_ctx(sid, ctx)
-    s = load_session(sid)
-    s["stack"] = [x for x in s.get("stack", []) if x != cid]
     s["current_skill"] = calls[s["stack"][-1]]["skill"] if s["stack"] else None
     save_session(sid, s)
     emit({"call_id": cid, "status": a.status, "stack": s["stack"],
@@ -450,6 +444,32 @@ def cmd_switch(a) -> int:
 
 # ------------------------------------------------------------------ context bus
 
+def _push_version(slot: dict, value, written_by, call_id, type_, ts) -> dict:
+    """Version a context slot.
+
+    Seeds `history` from a legacy single-value slot if missing, then appends the
+    new version. Top-level keys stay mirrored to the current version so `ctx get`
+    (which reads slots[key]["value"]) stays backward-compatible.
+    """
+    history = list(slot.get("history") or [])
+    if not history and "value" in slot:
+        history.append({
+            "value": slot.get("value"),
+            "written_by": slot.get("written_by"),
+            "call_id": slot.get("call_id"),
+            "rev": slot.get("rev", 1),
+            "ts": slot.get("ts"),
+        })
+    rev = (slot.get("rev", 0) or 0) + 1
+    ver = {"value": value, "written_by": written_by, "call_id": call_id,
+           "rev": rev, "ts": ts}
+    return {
+        "value": value, "type": type_, "written_by": written_by,
+        "call_id": call_id, "rev": rev, "ts": ts,
+        "history": history + [ver],
+    }
+
+
 def cmd_ctx_set(a) -> int:
     sid = require_sid(a.session)
     ctx = load_ctx(sid)
@@ -460,21 +480,14 @@ def cmd_ctx_set(a) -> int:
         die("--json given but value is not valid JSON")
     calls = _calls(sid)
     cid = _top_open(calls)
-    prev = slots.get(a.key)
-    slots[a.key] = {
-        "value": value,
-        "type": "json" if a.json else "text",
-        "written_by": a.by or (calls[cid]["skill"] if cid else None),
-        "call_id": cid,
-        "ts": now_iso(),
-        "rev": (prev or {}).get("rev", 0) + 1,
-    }
+    written_by = a.by or (calls[cid]["skill"] if cid else None)
+    slots[a.key] = _push_version(slots.get(a.key, {}), value, written_by, cid,
+                                 "json" if a.json else "text", now_iso())
     save_ctx(sid, ctx)
-    trace_append(sid, "ctx_set", key=a.key, rev=slots[a.key]["rev"],
-                 written_by=slots[a.key]["written_by"], call_id=cid,
+    trace_append(sid, "ctx_write", key=a.key, rev=slots[a.key]["rev"],
+                 written_by=written_by, call_id=cid,
                  preview=str(value)[:200])
-    emit({"key": a.key, "rev": slots[a.key]["rev"],
-          "written_by": slots[a.key]["written_by"]})
+    emit({"key": a.key, "rev": slots[a.key]["rev"], "written_by": written_by})
     return 0
 
 
@@ -484,7 +497,10 @@ def cmd_ctx_get(a) -> int:
     if a.key:
         if a.key not in slots:
             die(f"context key not found: {a.key}")
-        emit(slots[a.key] if a.meta else slots[a.key]["value"])
+        cur = slots[a.key]
+        if not a.meta:
+            trace_append(sid, "ctx_read", key=a.key, rev=cur.get("rev"))
+        emit(cur if a.meta else cur["value"])
         return 0
     emit({k: (v if a.meta else v["value"]) for k, v in slots.items()})
     return 0
@@ -498,6 +514,50 @@ def cmd_ctx_del(a) -> int:
         save_ctx(sid, ctx)
         trace_append(sid, "ctx_del", key=a.key)
     emit({"deleted": a.key})
+    return 0
+
+
+def cmd_ctx_history(a) -> int:
+    sid = require_sid(a.session)
+    slots = load_ctx(sid).get("slots", {})
+    if a.key not in slots:
+        die(f"context key not found: {a.key}")
+    slot = slots[a.key]
+    hist = slot.get("history") or [{
+        "value": slot.get("value"), "written_by": slot.get("written_by"),
+        "call_id": slot.get("call_id"), "rev": slot.get("rev", 1),
+        "ts": slot.get("ts"),
+    }]
+    cur_rev = slot.get("rev")
+    emit([{**h, "is_current": h.get("rev") == cur_rev} for h in hist])
+    return 0
+
+
+def cmd_ctx_rollback(a) -> int:
+    sid = require_sid(a.session)
+    ctx = load_ctx(sid)
+    slots = ctx.setdefault("slots", {})
+    if a.key not in slots:
+        die(f"context key not found: {a.key}")
+    slot = slots[a.key]
+    target = next((h for h in (slot.get("history") or [])
+                   if h.get("rev") == a.rev), None)
+    if target is None and slot.get("rev") == a.rev:
+        target = slot
+    if target is None:
+        die(f"rev {a.rev} not found for key '{a.key}'; run: ctx history {a.key}")
+    prev_rev = slot.get("rev")
+    slots[a.key] = _push_version(slot, target.get("value"),
+                                 target.get("written_by"), target.get("call_id"),
+                                 slot.get("type", "text"), now_iso())
+    slots[a.key]["rolled_back_from"] = prev_rev
+    save_ctx(sid, ctx)
+    trace_append(sid, "ctx_write", key=a.key, rev=slots[a.key]["rev"],
+                 written_by=slots[a.key]["written_by"],
+                 call_id=slots[a.key]["call_id"], rolled_back_from=prev_rev,
+                 preview=str(target.get("value"))[:200])
+    emit({"key": a.key, "rev": slots[a.key]["rev"],
+          "value": slots[a.key]["value"], "rolled_back_from": prev_rev})
     return 0
 
 
@@ -516,7 +576,7 @@ def cmd_trace(a) -> int:
              f"模式: {s.get('mode')}  状态: {s.get('status')}  "
              f"切换次数: {s.get('switches', 0)}  调用数: {len(calls)}", ""]
     icon = {"route": "?", "call_open": "→", "call_close": "✓", "switch": "⇄",
-            "ctx_set": "•", "ctx_del": "×", "call_suspend": "‖",
+            "ctx_write": "•", "ctx_read": "◁", "ctx_del": "×", "call_suspend": "‖",
             "call_resume": "▶", "session_new": "▷", "session_end": "■",
             "acquire": "↓"}
     parent_of = {c["id"]: c.get("parent") for c in calls.values()}
@@ -574,9 +634,14 @@ def cmd_trace(a) -> int:
             lines.append(f"        原因: {r.get('reason', '')}")
             if r.get("carry"):
                 lines.append(f"        携带: {', '.join(r['carry'])}")
-        elif e == "ctx_set":
+        elif e == "ctx_write":
+            rb = r.get("rolled_back_from")
+            tail = f" (rollback from rev{rb})" if rb else ""
             lines.append(f"{r['seq']:>3} {t} {mark} 写入 {r['key']} "
-                         f"(rev{r['rev']}, by {r.get('written_by') or '-'})")
+                         f"(rev{r['rev']}, by {r.get('written_by') or '-'}){tail}")
+        elif e == "ctx_read":
+            lines.append(f"{r['seq']:>3} {t} {mark} 读取 {r['key']} "
+                         f"(rev{r.get('rev')})")
         elif e == "acquire":
             lines.append(f"{r['seq']:>3} {t} {mark} 获取远程技能 {r.get('skill')} "
                          f"← {r.get('origin')} [{r.get('audit')}]")
@@ -698,6 +763,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("key", nargs="?")
     p.add_argument("--meta", action="store_true")
     p.set_defaults(fn=cmd_ctx_get)
+    p = ctx.add_parser("history", help="list all versions of a context slot")
+    p.add_argument("key")
+    p.set_defaults(fn=cmd_ctx_history)
+    p = ctx.add_parser("rollback", help="restore a slot to a previous revision")
+    p.add_argument("key")
+    p.add_argument("--rev", type=int, required=True, help="target revision number")
+    p.set_defaults(fn=cmd_ctx_rollback)
     p = ctx.add_parser("del")
     p.add_argument("key")
     p.set_defaults(fn=cmd_ctx_del)

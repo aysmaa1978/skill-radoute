@@ -13,3 +13,7 @@ Thumbs.db
 .workbuddy/
 registry.json
 registry_extra.json
+
+# Build artifacts (skill-creator packaged output)
+*.zip
+*.skill
