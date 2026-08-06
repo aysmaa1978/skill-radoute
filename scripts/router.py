@@ -252,15 +252,11 @@ def cmd_status(a) -> int:
 # 越界输入若只命中单字/停用词或分数过低，直接判 no_match，让调用方走远程获取链路。
 
 _STOPWORDS = {
-    # 通用英文停用词（closed-class 功能词，作为 latin token 命中时无语义价值）
-    "ai", "the", "a", "an", "to", "of", "for", "and", "or", "is", "in", "on",
-    "at", "with", "by", "do", "does", "did", "will", "would", "can", "could",
-    "should", "may", "might", "must", "have", "has", "had", "get", "got",
-    "make", "made", "use", "used", "run", "ran", "go", "going", "build",
-    "built", "create", "new", "your", "you", "my", "we", "they", "this",
-    "that", "these", "those", "what", "how", "when", "where", "who", "why",
-    "which", "me", "us", "it", "he", "she", "as", "be", "are", "was", "were",
-    "from", "into", "about", "up", "out", "off", "all", "any", "some",
+    # 仅保留无语义价值的闭类功能词（冠词/代词/介词）。动作动词（create/new/
+    # make/build/run/use/go 等及其变体）已移出——否则含正确技能名（如
+    # skill-creator）的查询会被误判为弱匹配而丢弃有效本地候选。
+    "a", "an", "the", "of", "for", "to", "with", "on", "at",
+    "from", "by", "in", "it", "this", "that", "these", "those",
 }
 
 

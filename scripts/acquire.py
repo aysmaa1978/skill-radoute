@@ -4,7 +4,8 @@
 Step 4 of: find -> audit -> confirm -> install -> register.
 
 Drives the 5-step pipeline. Interactive by default (input()), or --auto to
-skip prompts. Fail-safe: --auto still REJECTS P0 unless --force. Every
+skip prompts. Fail-safe: --auto REJECTS P0; P0 always needs interactive
+confirm (--force only overwrites an existing install, never bypasses P0). Every
 transition is appended to acquire_trace.jsonl in router-trace-compatible
 format ({"ts", "seq", "event", ...}) so it reads like any other trace event.
 State persists in acquire_state.json; an interrupted run resumes from the
@@ -88,6 +89,16 @@ def _download(sel: dict) -> Path:
     req = urllib.request.Request(url, headers={"User-Agent": "skill-radoute/1.1"})
     with urllib.request.urlopen(req, timeout=90) as r, open(zip_path, "wb") as f:
         shutil.copyfileobj(r, f)
+    # --- integrity check: reject corrupt / fake zips before extraction ---
+    # A valid skill package must be a readable zip containing SKILL.md. Any
+    # failure here deletes the bad download so it never reaches install.
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            if not any("SKILL.md" in name for name in zf.namelist()):
+                raise ValueError("SKILL.md not found in zip")
+    except Exception as e:
+        os.remove(zip_path)
+        raise RuntimeError(f"Integrity check failed: {e}")
     ext = work / "extracted"
     with zipfile.ZipFile(zip_path) as z:
         _safe_extract(z, ext)
@@ -126,16 +137,16 @@ def _run_audit(state: dict, args):
 def _run_confirm(state: dict, args, sel: dict, report: dict) -> bool:
     st.set_step(state, "confirm", "in_progress")
     v = report["verdict"]
-    if v == "P0" and not args.force:
+    # 高风险技能包（P0）必须交互确认，--auto / --force 均不影响此拦截。
+    # --force 仅用于覆盖已安装目录（见 _run_install），绝不绕过 P0 安全确认。
+    if v == "P0":
         if args.auto:
             trace("acquire_confirm", decision="rejected", reason="P0_under_auto")
-        else:
-            ans = input(f"[HIGH risk {report['risk']}] install anyway? [y/N] ").strip().lower()
-            if ans != "y":
-                trace("acquire_confirm", decision="rejected")
-                st.set_step(state, "confirm", "failed")
-                return False
-        if args.auto:
+            st.set_step(state, "confirm", "failed")
+            return False
+        ans = input(f"[HIGH risk {report['risk']}] install anyway? [y/N] ").strip().lower()
+        if ans != "y":
+            trace("acquire_confirm", decision="rejected")
             st.set_step(state, "confirm", "failed")
             return False
     elif v == "P1" and not args.auto:
@@ -234,7 +245,7 @@ def main() -> int:
     r.add_argument("--limit", type=int, default=10)
     r.add_argument("--slug", default=None, help="pin a specific candidate slug")
     r.add_argument("--auto", action="store_true", help="skip prompts (P0 still rejected)")
-    r.add_argument("--force", action="store_true", help="overwrite existing / install P0")
+    r.add_argument("--force", action="store_true", help="overwrite existing install only (does NOT bypass P0 confirm)")
     r.add_argument("--force-new", action="store_true",
                    help="start fresh even if a session is in progress")
     rs = sub.add_parser("resume", help="resume an interrupted session")

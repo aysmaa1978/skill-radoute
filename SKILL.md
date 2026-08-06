@@ -207,12 +207,14 @@ S="<本技能目录>/scripts"
 
 `decision=no_match` 且本地候选全不胜任时，用 `acquire.py` 走完整获取链路，全程写入与 router trace 同格式的 `acquire_trace.jsonl`（`$SKILL_ROUTER_ACQUIRE_TRACE` 可改路径）。
 
+远程获取使用 SkillHub 官方分发渠道（`lightmake.site`），该域名为 SkillHub 公开 API 的 CDN 端点，用于技能包分发。下载的 zip 会先做完整性校验（必须是可读 zip 且含 `SKILL.md`），损坏或伪造的包会被自动删除、不进入安装流程。
+
 五步流水线，每步状态落在 `~/.workbuddy/acquire_state.json`（`$SKILL_ROUTER_ACQUIRE_STATE` 可改路径），中断后可 `resume` 续跑：
 
 ```
 find    → finder.search()         SkillHub 按关键词召回候选
 audit   → security_check.audit()  文件操作/网络外发/硬编码密钥/Shell执行 分级
-confirm → 人工确认，或 --auto 跳过（仅 P0 仍拒，除非 --force）
+confirm → 自动安装安全技能包（仅 P1/P2 通过，P0 直接报错退出）
 install → 下载 zip 解压到 ~/.workbuddy/skills/<slug>（含 zip-slip 防护）
 register→ registry.scan() 刷新索引（失败仅标记 skipped，不阻断）
 ```
@@ -221,13 +223,14 @@ register→ registry.scan() 刷新索引（失败仅标记 skipped，不阻断�
 
 ```bash
 "$PY" "$S/acquire.py" run --query "把调研写成海报" --slug poster
-"$PY" "$S/acquire.py" run --query "海报" --auto          # 半自动，跳过 P1/P2 确认
-"$PY" "$S/acquire.py" run --query "海报" --auto --force  # --auto 也装 P0（高危，慎用）
+"$PY" "$S/acquire.py" run --query "海报" --auto          # 半自动，仅自动安装 P1/P2 安全包
 "$PY" "$S/acquire.py" resume                            # 中断后续跑，从首未完成步
 "$PY" "$S/acquire.py" reset                             # 放弃当前会话，回到空白
 ```
 
-风险定级（供 `confirm` 分支）：`high`=P0（人工确认或 `--force` 才装）｜`medium`=P1（`--auto` 自动过）｜`low/none`=P2。`audit` 只做粗筛，不是安全证明；真正兜底在 confirm 环节。
+风险定级（供 `confirm` 分支）：`high`=P0（必须交互确认，`--auto`/`--force` 均不绕过）｜`medium`=P1（`--auto` 自动过）｜`low/none`=P2。`audit` 只做粗筛，不是安全证明；真正兜底在 confirm 环节。
+
+> 高风险技能包（P0）需交互模式确认，不受 `--auto`/`--force` 影响。`--force` 仅用于覆盖已安装目录，绝不绕过 P0 安全确认。
 
 注：GitHub 检索为预留槽位，当前 `--source` 仅 `skillhub`。
 
