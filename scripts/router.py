@@ -305,6 +305,23 @@ def _is_sibling_conflict(candidates: list) -> bool:
     return bool(ns1) and ns1 == ns2
 
 
+def _is_multi_intent(spec: dict) -> bool:
+    """多意图检测：>=2 个不同任务类型，应拆步路由而非取单技能。"""
+    if not spec:
+        return False
+    return len(spec.get("sub_tasks", [])) >= 2
+
+
+def _decompose(spec: dict):
+    """构造多意图拆步计划与原因，供 decompose 决策复用。"""
+    plan = [{"type": st["type"], "target": st.get("target"),
+             "suggested_skills": intent.TYPE_SKILLS.get(st["type"], [])}
+            for st in spec["sub_tasks"]]
+    reason = (f"[MULTI] 检测到 {len(spec['sub_tasks'])} 个意图"
+              f"（{spec['intent']}），建议拆为多步路由")
+    return plan, reason
+
+
 def cmd_route(a) -> int:
     sid = require_sid(a.session)
     s = load_session(sid)
@@ -319,10 +336,9 @@ def cmd_route(a) -> int:
               "suggestion": sec.get("suggestion")})
         return 2
 
-    # --- optional: intent parse + capability/resource check under --guard ---
-    intent_spec = None
+    # --- intent parse: 始终运行（纯标准库，零 I/O），供多意图检测消费 ---
+    intent_spec = intent.parse(a.task)
     if a.guard:
-        intent_spec = intent.parse(a.task)
         trace_append(sid, "route_intent", task=a.task, **intent_spec)
         avail = [r["name"] for r in registry.scan()["skills"]]
         cov = sentinel.check(a.task, sub_tasks=intent_spec["sub_tasks"],
@@ -335,8 +351,11 @@ def cmd_route(a) -> int:
     cands = [c for c in cands if c["name"] not in exclude]
 
     decision, chosen, reason = "no_match", None, ""
+    sub_plan = None
     top1 = cands[0] if cands else None
     weak = bool(top1) and (top1["score"] < 0.5 or _is_weak_match(top1))
+    multi = _is_multi_intent(intent_spec)
+
     if cands and not weak:
         top2 = cands[1] if len(cands) > 1 else None
         margin = (top1["score"] / top2["score"]) if top2 and top2["score"] else 99.0
@@ -365,6 +384,11 @@ def cmd_route(a) -> int:
     else:
         reason = "本地注册表无匹配，需走远程获取流程（见 references/remote-acquisition.md）"
 
+    # 多意图：覆盖 auto / no_match / weak（同族冲突已优先为 confirm，不覆盖）
+    if multi and decision != "confirm":
+        sub_plan, reason = _decompose(intent_spec)
+        decision = "decompose"
+
     ev = trace_append(sid, "route", task=a.task, mode=mode, decision=decision,
                       chosen=(chosen or {}).get("name"), reason=reason,
                       candidates=[{"name": c["name"], "tier": c["tier"],
@@ -373,6 +397,8 @@ def cmd_route(a) -> int:
         "session": sid, "decision": decision, "reason": reason,
         "chosen": chosen, "candidates": cands, "trace_seq": ev["seq"],
         "intent": intent_spec,
+        "multi_intent": _is_multi_intent(intent_spec),
+        "sub_task_plan": sub_plan,
         "note": "分数只是词法先验，最终由模型做语义判定；分数接近时优先看 why 与 description",
     })
     return 0

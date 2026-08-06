@@ -66,7 +66,10 @@ S="<本技能目录>/scripts"
 |---|---|
 | `auto` | 直接进 Step 3 |
 | `confirm` | 把 top3 的名称、`why`、description 摘要列给用户，给出你的推荐与理由，等确认 |
+| `decompose` | 多意图：返回 `sub_task_plan`（每子任务类型 + 建议技能），逐个子任务重新 `route` / `switch` 串成多步链路，不要取单技能硬跑 |
 | `no_match` | 读 `references/remote-acquisition.md` 走远程获取 |
+
+> `route` 每次都会先跑 `intent.parse`（纯标准库），当解析出 ≥2 个不同任务类型时即判定为多意图，返回 `decompose` 而非盲目取 top1。同族碰撞（`[SIBLING]`）优先级高于多意图。
 
 **分数只是词法先验，最终选谁由你判断。** 命中理由全是零散单字、或 top1 的 description 明确排除了当前场景时，直接否决它，用 `--exclude <name>` 重新路由一次，让否决动作留在 trace 里。判定细则见 `references/routing-rules.md`。
 
