@@ -6,7 +6,7 @@
 
 **方式一 · SkillHub 一键安装**
 
-在 WorkBuddy 技能市场搜索 `skill-radoute`，点击安装即可（v1.1 已提交审核，v1.2 新增需求雷达与边界哨兵）。
+在 WorkBuddy 技能市场搜索 `skill-radoute`，点击安装即可（当前 v1.2.1 安全补丁版：弱匹配停用词收窄、远程获取完整性校验、获取链路安全收紧）。
 
 **方式二 · GitHub 手动安装**
 
@@ -92,11 +92,11 @@ S="<技能目录>/scripts"
 
 | 命令 | 用途 |
 |---|---|
-| `acquire.py run --query Q [--slug S] [--auto] [--force]` | 检索→审计→确认→安装→注册 全自动链路 |
+| `acquire.py run --query Q [--slug S] [--auto]` | 检索→审计→确认→安装→注册 全自动链路 |
 | `acquire.py resume` | 中断后续跑，从首未完成步 |
 | `acquire.py reset` | 放弃当前会话，回到空白 |
 
-> `--auto` 自动跳过 P1/P2 确认，但 P0（高危）仍拒绝，除非加 `--force`。
+> `--auto` 自动安装安全技能包（仅 P1/P2 审计通过；P0 高危恒需交互确认，不受 `--auto`/`--force` 影响）。`--force` 仅用于覆盖已安装的技能目录，不绕过任何安全审计。
 
 ## 配置
 
@@ -129,6 +129,18 @@ skill-radoute/
 ├── LICENSE                   # MIT
 └── README.md
 ```
+
+## 更新日志
+
+### v1.2.1（安全补丁）
+- **弱匹配守卫停用词收窄**：移除 `create/new/make/build/run/use/go` 等动作动词，仅保留无意义功能词，修复 `create a new skill` 被误判 `no_match` 丢弃正确技能的问题。
+- **远程获取完整性校验**：`acquire.py` 下载 zip 后校验可读且含 `SKILL.md`，损坏/伪造包自动删除并报错，不进安装流程。
+- **获取链路安全收紧**：P0 高危包恒需交互确认，`--auto`/`--force` 均不绕过；`--force` 仅覆盖已安装目录。
+- **文档**：补充 `lightmake.site` 为 SkillHub 官方 CDN 端点说明；`--auto`/`--force` 表述与代码对齐。
+
+### v1.2
+- 上下文池版本化（`ctx history` / `ctx rollback`）。
+- 需求雷达 `intent` 与边界哨兵 `sentinel`，`route --guard` 前置拦截越界任务。
 
 ## License
 
