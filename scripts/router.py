@@ -286,6 +286,25 @@ def _is_weak_match(top1: dict) -> bool:
     return all(_is_single_or_stop(t) for t in toks)
 
 
+def _is_sibling_conflict(candidates: list) -> bool:
+    """检测 top1 与 top2 是否为同族技能（同 tier，且命名空间重叠）。
+
+    命中两类同族：
+    1. 子技能包含型：一个名字是另一个的名字前缀（如 tencent-docs ⊂ tencent-docs-routing）；
+    2. 并列兄弟型：共享同一 vendor/模块段（首个 '-' 之前的命名空间相同，如 weixinpay-pay / weixinpay-register）。
+    """
+    if len(candidates) < 2:
+        return False
+    top1, top2 = candidates[0], candidates[1]
+    if top1.get("tier") != top2.get("tier"):
+        return False
+    name1, name2 = top1["name"].lower(), top2["name"].lower()
+    if name1.startswith(name2) or name2.startswith(name1):
+        return True
+    ns1, ns2 = name1.split("-")[0], name2.split("-")[0]
+    return bool(ns1) and ns1 == ns2
+
+
 def cmd_route(a) -> int:
     sid = require_sid(a.session)
     s = load_session(sid)
@@ -321,7 +340,11 @@ def cmd_route(a) -> int:
     if cands and not weak:
         top2 = cands[1] if len(cands) > 1 else None
         margin = (top1["score"] / top2["score"]) if top2 and top2["score"] else 99.0
-        if mode == "manual":
+        if _is_sibling_conflict(cands):
+            decision, reason = "confirm", (
+                f"[SIBLING] top1={top1['name']} 与 top2={top2['name']} "
+                f"为同族技能（同 tier 且名称前缀重叠），强制人工确认")
+        elif mode == "manual":
             decision, reason = "confirm", "mode=manual：始终由人确认"
         elif mode == "always":
             decision, chosen = "auto", top1
