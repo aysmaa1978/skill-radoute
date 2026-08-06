@@ -248,6 +248,48 @@ def cmd_status(a) -> int:
 
 # --------------------------------------------------------------------- routing
 
+# ----------------------------------------------------------------- weak-match guard (no_match 复活)
+# 越界输入若只命中单字/停用词或分数过低，直接判 no_match，让调用方走远程获取链路。
+
+_STOPWORDS = {
+    # 通用英文停用词（closed-class 功能词，作为 latin token 命中时无语义价值）
+    "ai", "the", "a", "an", "to", "of", "for", "and", "or", "is", "in", "on",
+    "at", "with", "by", "do", "does", "did", "will", "would", "can", "could",
+    "should", "may", "might", "must", "have", "has", "had", "get", "got",
+    "make", "made", "use", "used", "run", "ran", "go", "going", "build",
+    "built", "create", "new", "your", "you", "my", "we", "they", "this",
+    "that", "these", "those", "what", "how", "when", "where", "who", "why",
+    "which", "me", "us", "it", "he", "she", "as", "be", "are", "was", "were",
+    "from", "into", "about", "up", "out", "off", "all", "any", "some",
+}
+
+
+def _why_tokens(top1: dict) -> list[str]:
+    toks = []
+    for w in top1.get("why", []):
+        body = w.split(":", 1)[1] if ":" in w else w
+        for t in body.split(","):
+            t = t.strip()
+            if t:
+                toks.append(t)
+    return toks
+
+
+def _is_single_or_stop(tok: str) -> bool:
+    if tok.lower() in _STOPWORDS:
+        return True
+    if len(tok) == 1 and 0x4E00 <= ord(tok[0]) <= 0x9FFF:
+        return True
+    return False
+
+
+def _is_weak_match(top1: dict) -> bool:
+    toks = _why_tokens(top1)
+    if not toks:
+        return False
+    return all(_is_single_or_stop(t) for t in toks)
+
+
 def cmd_route(a) -> int:
     sid = require_sid(a.session)
     s = load_session(sid)
@@ -278,8 +320,9 @@ def cmd_route(a) -> int:
     cands = [c for c in cands if c["name"] not in exclude]
 
     decision, chosen, reason = "no_match", None, ""
-    if cands:
-        top1 = cands[0]
+    top1 = cands[0] if cands else None
+    weak = bool(top1) and (top1["score"] < 0.5 or _is_weak_match(top1))
+    if cands and not weak:
         top2 = cands[1] if len(cands) > 1 else None
         margin = (top1["score"] / top2["score"]) if top2 and top2["score"] else 99.0
         if mode == "manual":
@@ -295,6 +338,11 @@ def cmd_route(a) -> int:
             decision = "confirm"
             reason = (f"top1 分数 {top1['score']}，领先幅度 {margin:.2f}x，"
                       f"未同时满足阈值 {a.threshold} 与领先 {a.margin}x")
+    elif weak:
+        if top1["score"] < 0.5:
+            reason = f"top1 分数 {top1['score']:.3f} < 0.5，视为越界"
+        else:
+            reason = "top1 匹配全部来自单字/停用词，视为越界"
     else:
         reason = "本地注册表无匹配，需走远程获取流程（见 references/remote-acquisition.md）"
 
