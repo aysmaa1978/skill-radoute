@@ -6,7 +6,7 @@
 
 **方式一 · SkillHub 一键安装**
 
-在 WorkBuddy 技能市场搜索 `skill-radoute`，点击安装即可（当前 v1.3.0：兄弟技能消歧、多意图检测、call close 修复）。
+在 WorkBuddy 技能市场搜索 `skill-radoute`，点击安装即可（当前 v1.4.0：CJK 短查询提权、词干泄漏收窄、停用词 n-gram 泄漏修复、call 链路冒烟测试）。
 
 **方式二 · GitHub 手动安装**
 
@@ -133,6 +133,13 @@ skill-radoute/
 ```
 
 ## 更新日志
+
+### v1.4.0
+- **CJK 短查询提权**：归一化分母改用 `query_mass()`（Latin 词=1，CJK 每 2 字=1），修复 n-gram 展开致中文查询比同义英文低约 35% 的根因；8 个真实中文查询打分提升 1.21x–1.45x（如「画架构图」5.68→7.64）。
+- **词干泄漏收窄**：新增 `_stem_match()`，要求共享前缀覆盖较长词的 >50%，修复 `data~database` / `auto~automation` / `mark~marketplace` / `word~wordpress` 等误命中抬高错配技能的问题。
+- **停用词 n-gram 泄漏修复**：扩展功能字停用词表并在 `bump()` 内整串丢弃，修复 `帮我遛狗` / `我想学游泳` 等纯语法碎片越过 0.5 自动地板的问题；越界查询最高分从 2.49 降至 0.81，且经守卫落 `confirm` 不误判 `auto`（0.5 阈值本身不动）。
+- **call 链路冒烟测试**：新增 `test_call_chain.py`（16 断言，覆盖 open/close/switch/resume 与栈状态），可捕获 d449b38 类静默回归；`test_scoring.py` 锁定 14 条打分不变量。
+- 回归：54 例全量测试仅 1 处差异且为改进，clear 集 auto 率 51.6%→54.8%，零退化。
 
 ### v1.3.0
 - **兄弟技能消歧**：top1 与 top2 同 tier 且名称前缀重叠（同族）时强制 `confirm`，不再靠分数硬选，`reason` 标 `[SIBLING]`。修复 PowerPoint / tencent-doc / edit-word / weixin-pay 等同族技能被误自动选中的问题。

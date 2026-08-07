@@ -6,7 +6,7 @@ A meta-skill router. Within a single session it discovers, selects, invokes and 
 
 **Option 1 · One-click via SkillHub**
 
-Search `skill-radoute` in the WorkBuddy skill marketplace and click install. (Current release: **v1.3.0** — sibling disambiguation, multi-intent detection, `call close` fix.)
+Search `skill-radoute` in the WorkBuddy skill marketplace and click install. (Current release: **v1.4.0** — CJK short-query boost, stem-leak narrowing, stopword n-gram leak fix, call-chain smoke test.)
 
 **Option 2 · Manual install from GitHub**
 
@@ -133,6 +133,13 @@ skill-radoute/
 ```
 
 ## Changelog
+
+### v1.4.0
+- **CJK short-query boost**: the normalization denominator now uses `query_mass()` (Latin word = 1, every 2 CJK chars = 1), fixing the root cause where n-gram expansion made Chinese queries score ~35% lower than synonymous English ones; 8 real Chinese queries gained 1.21x–1.45x (e.g. "draw architecture diagram" 5.68→7.64).
+- **Stem-leak narrowing**: added `_stem_match()`, requiring the shared prefix to cover >50% of the longer word, fixing false matches like `data~database` / `auto~automation` / `mark~marketplace` / `word~wordpress` that inflated wrong-skill scores.
+- **Stopword n-gram leak fix**: expanded the function-word stop list and drop whole stopword strings inside `bump()`, fixing pure-syntax fragments like `帮我遛狗` / `我想学游泳` crossing the 0.5 auto floor; top out-of-scope score dropped from 2.49 to 0.81 and is guarded into `confirm` instead of a wrong `auto` (the 0.5 threshold itself is unchanged).
+- **Call-chain smoke test**: added `test_call_chain.py` (16 assertions covering open/close/switch/resume and stack state) that catches d449b38-class silent regressions; `test_scoring.py` locks 14 scoring invariants.
+- Regression: across 54 full-suite cases only 1 diff, and it is an improvement; clear-set auto rate 51.6%→54.8%, zero degradation.
 
 ### v1.3.0
 - **Sibling disambiguation**: when top1 and top2 share the same tier and overlapping name prefixes (same family), the decision is forced to `confirm` instead of being decided by score, with `reason` tagged `[SIBLING]`. Fixes same-family skills (PowerPoint / tencent-doc / edit-word / weixin-pay) being auto-selected incorrectly.
