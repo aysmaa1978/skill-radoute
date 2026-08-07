@@ -489,6 +489,8 @@ def cmd_call_close(a) -> int:
                          written_by=calls[cid]["skill"], call_id=cid,
                          preview=str(v)[:200])
         save_ctx(sid, ctx)
+    s = load_session(sid)
+    s["stack"] = [x for x in s.get("stack", []) if x != cid]
     s["current_skill"] = calls[s["stack"][-1]]["skill"] if s["stack"] else None
     save_session(sid, s)
     emit({"call_id": cid, "status": a.status, "stack": s["stack"],
