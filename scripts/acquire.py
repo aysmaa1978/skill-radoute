@@ -16,6 +16,7 @@ Does not modify router.py / registry.py public interfaces.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -31,6 +32,18 @@ import security_check
 import acquire_state as st
 
 SKILLS_DIR = Path.home() / ".workbuddy" / "skills"
+
+# v1.5 (云鼎修复②): 下载后 SHA256 校验。预期值硬编码，绝不从远程获取。
+# 只安装本表内、哈希匹配、且版本锁定的技能；其余一律拒绝。
+# 哈希由作者用 `sha256sum <zip>` 计算后写入，禁止占位符上线。
+# 下方 tavily/poster 为初始预置示例；其哈希为占位符，作者补全真实
+# 发布包哈希前，这两项的获取会被拒绝并提示「请联系作者更新」。
+KNOWN_SKILLS: dict[str, str] = {
+    "tavily": "sha256:abc123...",   # 初始预置（占位，待作者用 sha256sum <zip> 补真实哈希）
+    "poster": "sha256:def456...",   # 初始预置（占位，待作者用 sha256sum <zip> 补真实哈希）
+    # 路由器自身自更新：vX.Y.Z 的哈希在下一版记录（避免「鸡生蛋」自举悖论），
+    # 即本版 KNOWN_SKILLS 不内嵌自身哈希，待 v1.6.0 再补。
+}
 TRACE_FILE = Path(os.environ.get(
     "SKILL_ROUTER_ACQUIRE_TRACE",
     str(Path.home() / ".workbuddy" / "acquire_trace.jsonl")))
@@ -80,18 +93,50 @@ def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
     zf.extractall(dest)
 
 
+class _NeedAuthor(RuntimeError):
+    """Slug not in trusted table / no version: ask author to onboard it."""
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for blk in iter(lambda: f.read(65536), b""):
+            h.update(blk)
+    return "sha256:" + h.hexdigest()
+
+
+def _verify_hash(zip_path: Path, slug: str) -> None:
+    """云鼎修复②: 比对下载 zip 的 SHA256 与硬编码预期值。
+
+    未预置（不在 KNOWN_SKILLS）或哈希不匹配 -> 删除文件并抛错，
+    绝不进入安装流程。哈希值只来自代码，不从远程获取。
+    """
+    expected = KNOWN_SKILLS.get(slug)
+    if not expected:
+        os.remove(zip_path)
+        raise RuntimeError(
+            f"请联系作者更新：技能 '{slug}' 未预置可信哈希，无法自动安装")
+    actual = _sha256(zip_path)
+    if actual != expected:
+        os.remove(zip_path)
+        raise RuntimeError(
+            f"SHA256 校验失败：{slug} 期望 {expected}，实际 {actual}；"
+            f"已删除下载文件，请联系作者更新")
+
+
 def _download(sel: dict) -> Path:
     url = sel["download_url"]
     work = DL_ROOT / sel["slug"]
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True, exist_ok=True)
     zip_path = work / f"{sel['slug']}.zip"
-    req = urllib.request.Request(url, headers={"User-Agent": "skill-radoute/1.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "skill-radoute/1.5"})
     with urllib.request.urlopen(req, timeout=90) as r, open(zip_path, "wb") as f:
         shutil.copyfileobj(r, f)
-    # --- integrity check: reject corrupt / fake zips before extraction ---
-    # A valid skill package must be a readable zip containing SKILL.md. Any
-    # failure here deletes the bad download so it never reaches install.
+    # --- 云鼎修复②: SHA256 校验（硬编码预期值，绝不从远程获取）---
+    # 未预置 / 不匹配 -> 删除文件并抛错，绝不进入安装流程。
+    _verify_hash(zip_path, sel["slug"])
+    # --- 完整性检查: 拒绝损坏/伪造的 zip（必须可读且含 SKILL.md）---
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             if not any("SKILL.md" in name for name in zf.namelist()):
@@ -110,10 +155,18 @@ def _download(sel: dict) -> Path:
 
 def _run_find(state: dict, args) -> list:
     st.set_step(state, "find", "in_progress")
-    cands = finder.search(args.query, source=args.source, limit=args.limit)
-    st.set_ctx(state, candidates=cands, query=args.query, source=args.source)
+    version = args.version or st.get_ctx(state, "version") or ""
+    try:
+        cands = finder.search(args.query, source=args.source,
+                              limit=args.limit, version=version)
+    except finder.FinderError as e:
+        st.set_step(state, "find", "failed")
+        raise _NeedAuthor(str(e))
+    st.set_ctx(state, candidates=cands, query=args.query,
+               source=args.source, version=version)
     st.set_step(state, "find", "done")
-    trace("acquire_find", query=args.query, source=args.source, count=len(cands))
+    trace("acquire_find", query=args.query, source=args.source,
+          version=version, count=len(cands))
     return cands
 
 
@@ -125,7 +178,11 @@ def _run_audit(state: dict, args):
         trace("acquire_audit", error="no_candidate")
         st.set_step(state, "audit", "failed")
         return None
-    dl = _download(sel)
+    try:
+        dl = _download(sel)
+    except RuntimeError as e:
+        st.set_step(state, "audit", "failed")
+        raise                       # _pipeline surfaces it via _fail
     report = security_check.audit(str(dl))
     st.set_ctx(state, selected=sel, audit=report, download_path=str(dl))
     st.set_step(state, "audit", "done")
@@ -137,6 +194,7 @@ def _run_audit(state: dict, args):
 def _run_confirm(state: dict, args, sel: dict, report: dict) -> bool:
     st.set_step(state, "confirm", "in_progress")
     v = report["verdict"]
+    preset = (sel["slug"] in KNOWN_SKILLS) and bool(sel.get("version"))
     # 高风险技能包（P0）必须交互确认，--auto / --force 均不影响此拦截。
     # --force 仅用于覆盖已安装目录（见 _run_install），绝不绕过 P0 安全确认。
     if v == "P0":
@@ -149,6 +207,15 @@ def _run_confirm(state: dict, args, sel: dict, report: dict) -> bool:
             trace("acquire_confirm", decision="rejected")
             st.set_step(state, "confirm", "failed")
             return False
+    elif args.auto and not preset:
+        # 云鼎修复③：--auto 仅对「已预置哈希且版本锁定」的技能生效；
+        # 其余一律降级为人工确认，不自动获取。
+        ans = input(f"[not pinned/preset] confirm install of {sel['slug']}? [y/N] ").strip().lower()
+        if ans != "y":
+            trace("acquire_confirm", decision="rejected",
+                  reason="auto_requires_preset_and_pinned")
+            st.set_step(state, "confirm", "failed")
+            return False
     elif v == "P1" and not args.auto:
         ans = input(f"[MEDIUM risk] confirm install? [Y/n] ").strip().lower()
         if ans == "n":
@@ -156,7 +223,7 @@ def _run_confirm(state: dict, args, sel: dict, report: dict) -> bool:
             st.set_step(state, "confirm", "failed")
             return False
     st.set_step(state, "confirm", "done")
-    trace("acquire_confirm", decision="approved", verdict=v)
+    trace("acquire_confirm", decision="approved", verdict=v, preset=preset)
     return True
 
 
@@ -205,9 +272,15 @@ def _pipeline(state: dict, args, start: str) -> None:
     dl = st.get_ctx(state, "download_path")
     for step in steps[idx:]:
         if step == "find":
-            _run_find(state, args)
+            try:
+                _run_find(state, args)
+            except _NeedAuthor as e:
+                return _fail(state, f"请联系作者更新：{e}")
         elif step == "audit":
-            r = _run_audit(state, args)
+            try:
+                r = _run_audit(state, args)
+            except RuntimeError as e:
+                return _fail(state, str(e))
             if r is None:
                 return _fail(state, "audit: no candidate or download failed")
             sel, report, dl = r
@@ -240,15 +313,20 @@ def main() -> int:
     ap = argparse.ArgumentParser(prog="acquire.py", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="start acquisition (new session)")
-    r.add_argument("--query", required=True)
-    r.add_argument("--source", default="skillhub")
+    r.add_argument("--query", required=True, help="skill slug, e.g. skill-radoute")
+    r.add_argument("--source", default="github")
+    r.add_argument("--version", default="",
+                   help="pinned version tag, e.g. v1.5.0 (required for trusted fetch)")
     r.add_argument("--limit", type=int, default=10)
     r.add_argument("--slug", default=None, help="pin a specific candidate slug")
-    r.add_argument("--auto", action="store_true", help="skip prompts (P0 still rejected)")
+    r.add_argument("--auto", action="store_true",
+                   help="skip prompts; only for preset+version-locked skills (P0 still rejected)")
     r.add_argument("--force", action="store_true", help="overwrite existing install only (does NOT bypass P0 confirm)")
     r.add_argument("--force-new", action="store_true",
                    help="start fresh even if a session is in progress")
     rs = sub.add_parser("resume", help="resume an interrupted session")
+    rs.add_argument("--version", default="",
+                   help="pinned version tag if not already captured")
     rs.add_argument("--auto", action="store_true")
     rs.add_argument("--force", action="store_true")
     sp = sub.add_parser("status", help="show current state")

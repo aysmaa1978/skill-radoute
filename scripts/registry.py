@@ -366,6 +366,69 @@ def _overlap(qt: dict, dt: dict, idf: dict) -> tuple[float, list[str]]:
     return total, [h[1] for h in hits]
 
 
+# --------------------------------------------------- semantic (synonym) lift
+# 同义词 / 中英对齐表。组内词视作等价：查询词与技能自身 token 落在同一组即语义命中。
+# 纯数据驱动，无嵌入模型（ponytail: 预置词典覆盖常见同义即可）。
+#
+# 设计要点（防误判）：
+#  - 单字 CJK（搜/写/画）作为组内成员可用于"文档侧链接"——技能描述里常只留单字，
+#    多字查询同义词（检索/撰写/绘制）借此命中；但查询侧单字已被 _semantic_boost 跳过，
+#    所以单字不会自触发 boost。
+#  - 组内词都是动作词，不会出现在不相关技能的描述里形成误命中（boost 仅当技能自身
+#    token 含同组成员才触发），因此无关技能拿不到语义加分。
+_SYNONYMS: dict[str, list[str]] = {
+    "search": ["查找", "搜索", "检索", "搜"],
+    "draw":   ["画图", "绘制", "绘图", "画"],
+    "write":  ["撰写", "创作", "写作", "写"],
+}
+_SYNONYMS_IDX: dict[str, set[str]] = {}
+SEMANTIC_WEIGHT = 0.3  # 每个命中查询词（按 token 权重缩放）对 raw 的加成分（保守值，防误判）
+
+
+def _build_syn_index() -> None:
+    idx: dict[str, set[str]] = {}
+    for _canon, _alts in _SYNONYMS.items():
+        _grp = {_canon, *_alts}
+        for _t in _grp:
+            idx.setdefault(_t, set()).update(_grp)
+    _SYNONYMS_IDX.clear()
+    _SYNONYMS_IDX.update(idx)
+
+
+_build_syn_index()
+
+
+def _semantic_boost(qtoks, ntoks, dtoks, ttoks):
+    """Cross-lingual / synonym lift. Returns (matched_query_terms, gain).
+
+    A query term q boosts a skill only when q is NOT already a lexical hit
+    (no double counting) AND q shares a synonym group with one of the
+    skill's own tokens. Because the group is derived from the skill's own
+    tokens, unrelated skills get no lift -> no false positives.
+    """
+    if not _SYNONYMS_IDX:
+        return [], 0.0
+    doc_all = set(ntoks) | set(dtoks) | set(ttoks)
+    # 单字 CJK 噪声大（"查"/"画" 随处出现），语义匹配只用多字词，与 tokenize
+    # 对单字的不信任一致。
+    doc_sem = {d for d in doc_all if not (len(d) == 1 and _CJK.match(d))}
+    matched = []
+    for q in qtoks:
+        if len(q) == 1 and _CJK.match(q):
+            continue
+        if q in doc_all:            # 已词法命中，避免重复计分
+            continue
+        grp = _SYNONYMS_IDX.get(q)
+        if not grp:
+            continue
+        if any(d in grp and d != q for d in doc_sem):
+            matched.append(q)
+    if not matched:
+        return [], 0.0
+    gain = SEMANTIC_WEIGHT * sum(qtoks[q] for q in matched)
+    return matched, gain
+
+
 def doc_tokens(rec: dict) -> tuple[dict, dict, dict]:
     ntoks = tokenize(str(rec.get("name", "")) + " " + str(rec.get("dir_name", ""))
                      + " " + str(rec.get("display_name", "")))
@@ -388,7 +451,14 @@ def build_idf(records: list) -> dict:
 
 
 def score_skill(qtoks: dict, query_lc: str, rec: dict,
-                idf: dict | None = None) -> tuple[float, list[str]]:
+                idf: dict | None = None) -> tuple[float, list[str], dict]:
+    """Return (score, why, detail).
+
+    `detail` carries the lexical sub-scores plus the semantic-boost breakdown so
+    callers such as `route --explain` can render a transparent score_breakdown.
+    The return arity grows from 2 to 3; non-explain callers keep unpacking the
+    first two values and ignore `detail`.
+    """
     idf = idf or {}
     name = str(rec.get("name", "")).lower()
     ntoks, dtoks, ttoks = doc_tokens(rec)
@@ -398,8 +468,10 @@ def score_skill(qtoks: dict, query_lc: str, rec: dict,
     sd, hit_d = _overlap(qtoks, dtoks, idf)
     st, hit_t = _overlap(qtoks, ttoks, idf)
     raw = 3.0 * sn + 1.0 * sd + 1.5 * st
+    name_bonus = 0.0
     if name and name in query_lc:
-        raw += 8.0
+        name_bonus = 8.0
+        raw += name_bonus
         why.append(f"名称直接出现在任务里: {name}")
     if hit_n:
         why.append("名称命中: " + ",".join(hit_n[:6]))
@@ -407,17 +479,35 @@ def score_skill(qtoks: dict, query_lc: str, rec: dict,
         why.append("标签命中: " + ",".join(hit_t[:6]))
     if hit_d:
         why.append("描述命中: " + ",".join(hit_d[:8]))
+    matched, sem_gain = _semantic_boost(qtoks, ntoks, dtoks, ttoks)
+    raw += sem_gain
+    if matched:
+        why.append("语义同义命中: " + ",".join(matched[:6]))
+    detail = {
+        "name_score": round(sn, 4),
+        "desc_score": round(sd, 4),
+        "tag_score": round(st, 4),
+        "name_in_query_bonus": round(name_bonus, 4),
+        "semantic_matched": matched,
+        "semantic_gain": round(sem_gain, 4),
+        "raw": round(raw, 4),
+    }
     if raw <= 0:
-        return 0.0, why
+        detail["final"] = 0.0
+        return 0.0, why, detail
     # normalize against query size so long queries do not inflate scores.
     # query_mass, not sum(qtoks): CJK n-gram expansion otherwise deflates scores.
     norm = raw / (query_mass(query_lc) ** 0.5 + 3.0)
-    final = norm * TIER_WEIGHT.get(rec.get("tier", "user"), 0.8)
-    return round(final, 4), why
+    tw = TIER_WEIGHT.get(rec.get("tier", "user"), 0.8)
+    final = norm * tw
+    detail["norm"] = round(norm, 4)
+    detail["tier_weight"] = tw
+    detail["final"] = round(final, 4)
+    return round(final, 4), why, detail
 
 
 def search(query: str, top: int = 5, source: str | None = None,
-           reg: dict | None = None) -> list[dict]:
+           reg: dict | None = None, with_detail: bool = False) -> list[dict]:
     reg = reg or load_registry()
     qtoks = tokenize(query)
     qlc = (query or "").lower()
@@ -427,14 +517,18 @@ def search(query: str, top: int = 5, source: str | None = None,
     for rec in records:
         if source and rec.get("tier") != source:
             continue
-        s, why = score_skill(qtoks, qlc, rec, idf)
+        s, why, detail = score_skill(qtoks, qlc, rec, idf)
         if s > 0:
-            out.append({
+            item = {
                 "name": rec["name"], "tier": rec["tier"], "score": s,
                 "path": rec["path"], "skill_md": rec["skill_md"],
                 "description": rec.get("description", "")[:300],
                 "why": why,
-            })
+            }
+            # 仅当要求解释时附带 score_breakdown，保持非 explain 输出不变
+            if with_detail:
+                item["score_breakdown"] = detail
+            out.append(item)
     out.sort(key=lambda x: -x["score"])
     return out[:top]
 

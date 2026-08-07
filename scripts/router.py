@@ -322,6 +322,27 @@ def _decompose(spec: dict):
     return plan, reason
 
 
+def _missing_triggers(top1: dict | None, top2: dict | None, margin: float,
+                      mode: str, weak: bool, a) -> list[str]:
+    """解释为何没有自动选取（仅 explain + confirm 决策时使用）。"""
+    gaps: list[str] = []
+    if weak and top1:
+        if top1["score"] < 0.5:
+            gaps.append(f"top1 分数 {top1['score']:.3f} < 0.5，匹配越界")
+        else:
+            gaps.append("top1 匹配全部来自单字/停用词，视为越界")
+        return gaps
+    if top1 and mode == "manual":
+        gaps.append("mode=manual：禁止自动选取，需人工确认")
+    if top1 and top1["score"] < a.threshold:
+        gaps.append(f"top1 分数 {top1['score']} < 自动阈值 {a.threshold}")
+    if top1 and top2 and margin < a.margin:
+        gaps.append(f"领先幅度 {margin:.2f}x < 要求 {a.margin}x")
+    if top1 and top2 and _is_sibling_conflict([top1, top2]):
+        gaps.append(f"top1 与 top2 同族（{top1['name']} / {top2['name']}），需人工消歧")
+    return gaps
+
+
 def cmd_route(a) -> int:
     sid = require_sid(a.session)
     s = load_session(sid)
@@ -346,19 +367,20 @@ def cmd_route(a) -> int:
         for w in cov.get("warnings", []):
             trace_append(sid, "route_warning", task=a.task, warning=w)
 
-    cands = registry.search(a.task, top=a.top)
+    cands = registry.search(a.task, top=a.top,
+                             with_detail=getattr(a, "explain", False))
     exclude = set(a.exclude or [])
     cands = [c for c in cands if c["name"] not in exclude]
 
     decision, chosen, reason = "no_match", None, ""
     sub_plan = None
     top1 = cands[0] if cands else None
+    top2 = cands[1] if len(cands) > 1 else None
+    margin = (top1["score"] / top2["score"]) if (top1 and top2 and top2["score"]) else 99.0
     weak = bool(top1) and (top1["score"] < 0.5 or _is_weak_match(top1))
     multi = _is_multi_intent(intent_spec)
 
     if cands and not weak:
-        top2 = cands[1] if len(cands) > 1 else None
-        margin = (top1["score"] / top2["score"]) if top2 and top2["score"] else 99.0
         if _is_sibling_conflict(cands):
             decision, reason = "confirm", (
                 f"[SIBLING] top1={top1['name']} 与 top2={top2['name']} "
@@ -393,6 +415,31 @@ def cmd_route(a) -> int:
                       chosen=(chosen or {}).get("name"), reason=reason,
                       candidates=[{"name": c["name"], "tier": c["tier"],
                                    "score": c["score"]} for c in cands])
+
+    # --- explain 模式：输出透明报告，不影响正常路由路径 ---
+    if getattr(a, "explain", False):
+        top_candidates = []
+        for c in cands:
+            entry = {
+                "name": c["name"], "tier": c["tier"], "score": c["score"],
+                "why": c.get("why", []),
+            }
+            sb = c.get("score_breakdown")
+            if sb:
+                entry["score_breakdown"] = sb
+            top_candidates.append(entry)
+        report = {
+            "decision_reason": reason,
+            "decision": decision,
+            "top_candidates": top_candidates,
+            "chosen": (chosen or {}).get("name"),
+        }
+        if decision == "confirm":
+            report["missing_trigger"] = _missing_triggers(
+                top1, top2, margin, mode, weak, a)
+        emit(report)
+        return 0
+
     emit({
         "session": sid, "decision": decision, "reason": reason,
         "chosen": chosen, "candidates": cands, "trace_seq": ev["seq"],
@@ -865,6 +912,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--exclude", action="append", help="skill name to skip (repeatable)")
     p.add_argument("--guard", action="store_true",
                    help="路由前额外跑意图解析 + 能力/资源边界检查（安全边界始终检查）")
+    p.add_argument("--explain", action="store_true",
+                   help="输出详细路由报告（top_candidates/score_breakdown/"
+                        "decision_reason/missing_trigger），不影响正常路由行为")
     p.set_defaults(fn=cmd_route)
 
     # --- v1.2 P1: intent (需求雷达) / sentinel (边界哨兵) ---

@@ -119,7 +119,7 @@ skill-radoute/
 ├── scripts/
 │   ├── registry.py           # skill index & scoring (five-source scan)
 │   ├── router.py             # session/routing/context/call-chain
-│   ├── finder.py             # acquire: SkillHub search & normalization
+│   ├── finder.py             # acquire: trusted release-table resolution (GitHub Releases)
 │   ├── security_check.py     # acquire: security audit grading
 │   ├── acquire_state.py      # acquire: state persistence & resume
 │   ├── acquire.py            # acquire: five-step pipeline controller
@@ -133,6 +133,15 @@ skill-radoute/
 ```
 
 ## Changelog
+
+### v1.5.0
+- **`route --explain` transparent routing report**: new `--explain` flag emits `top_candidates`, `score_breakdown` (per-candidate name/desc/tag breakdown + synonym hit), and `decision_reason` (why auto / confirm / no_match / decompose); when `confirm`, also `missing_trigger` (why not auto-selected). Output via `json.dumps(indent=2)`; the normal routing emit schema is byte-for-byte unchanged (`test_explain.py`, 14 assertions).
+- **Lightweight semantic matching (synonym lift)**: `registry.py` adds a preset zh/en synonym table (search↔查找/搜索/检索, draw↔画图/绘制/绘图, write↔撰写/创作/写作); when a query term and a skill's own token fall in the same synonym group, a `SEMANTIC_WEIGHT=0.3` lift applies. Pure data-driven, no embedding model, zero new deps; the lift only fires when the skill itself contains a group member, so unrelated skills gain no semantic score (no false positives).
+- **Weak-match guard (no_match revival)**: `router.py` adds a weak-match guard — when top1's score is < 0.5 or all its match reasons are single-CJK/stopword tokens, the decision becomes `no_match` and the caller falls through to the remote-acquisition flow, so out-of-scope input is no longer misrouted as a confirmable wrong skill. The guard's stopword list is narrowed (only function words kept; action verbs like create/new/make removed), which eliminates the `create a new skill` false-negative that dropped the correct skill. Across 54 real regression cases: 2 out-of-scope inputs correctly revived to no_match, 0 false negatives (100% determinism, 3 identical rounds).
+- **(Yunding security fix) Trusted download source**: removed the unverified `lightmake.site` CDN; `finder.py` now resolves from a trusted release table `TRUSTED_RELEASES` by slug + explicit version, and the download URL always uses signed GitHub Releases (`GITHUB_RELEASE`). GitHub Releases is the trusted fallback until SkillHub's official registry endpoint is available.
+- **(Yunding security fix) SHA256 hash verification**: after download, `acquire.py` compares the zip's SHA256 against the hardcoded `KNOWN_SKILLS` expected value (never fetched from the network). Packages without a preset hash, or with a hash mismatch, are deleted and aborted — they never enter the install flow.
+- **(Yunding security fix) Version pinning + human confirmation**: acquisition requests must carry an explicit version (no `latest` slug-only resolution); P0 high-risk packages always require interactive confirmation (`--auto`/`--force` never bypass); `--auto` only auto-installs skills that are both hash-preset and version-locked, everything else degrades to manual confirmation.
+- Acceptance: 54-case full regression shows zero decision diff vs the v1.4 baseline, clear-set auto rate holds at 54.8%; new-skill download goes through GitHub Releases + hash check; preset-hash skills install, non-preset abort with "请联系作者更新"; Yunding re-scan clears all three findings.
 
 ### v1.4.0
 - **CJK short-query boost**: the normalization denominator now uses `query_mass()` (Latin word = 1, every 2 CJK chars = 1), fixing the root cause where n-gram expansion made Chinese queries score ~35% lower than synonymous English ones; 8 real Chinese queries gained 1.21x–1.45x (e.g. "draw architecture diagram" 5.68→7.64).
@@ -150,7 +159,7 @@ skill-radoute/
 - **Narrowed weak-match stopwords**: removed action verbs such as `create/new/make/build/run/use/go`; kept only meaningless function words, fixing `create a new skill` being misclassified as `no_match` and dropping the correct skill.
 - **Remote-acquisition integrity check**: after `acquire.py` downloads a zip, it verifies the archive is readable and contains `SKILL.md`; corrupt/forged packages are auto-deleted with an error and never enter the install flow.
 - **Tightened acquisition safety**: P0 high-risk packages always require interactive confirmation; `--auto`/`--force` never bypass it; `--force` only overwrites an installed directory.
-- **Docs**: added `lightmake.site` as the official SkillHub CDN endpoint note; aligned `--auto`/`--force` wording with the code.
+- **Docs**: aligned `--auto`/`--force` wording with the code (note: the `lightmake.site` source was removed in v1.5 in favor of signed GitHub Releases + SHA256 verification).
 
 ### v1.2
 - Context-pool versioning (`ctx history` / `ctx rollback`).

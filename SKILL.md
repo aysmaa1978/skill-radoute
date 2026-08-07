@@ -210,12 +210,12 @@ S="<本技能目录>/scripts"
 
 `decision=no_match` 且本地候选全不胜任时，用 `acquire.py` 走完整获取链路，全程写入与 router trace 同格式的 `acquire_trace.jsonl`（`$SKILL_ROUTER_ACQUIRE_TRACE` 可改路径）。
 
-远程获取使用 SkillHub 官方分发渠道（`lightmake.site`），该域名为 SkillHub 公开 API 的 CDN 端点，用于技能包分发。下载的 zip 会先做完整性校验（必须是可读 zip 且含 `SKILL.md`），损坏或伪造的包会被自动删除、不进入安装流程。
+远程获取使用带签名的 GitHub Releases 作为可信源（`finder.GITHUB_RELEASE`），不再使用任何未经验证的第三方 CDN。下载的 zip 先做 **SHA256 哈希校验**（预期值硬编码在 `acquire.KNOWN_SKILLS`，绝不从远程获取），再做完整性校验（必须是可读 zip 且含 `SKILL.md`）；未预置哈希、哈希不匹配、或伪造的包会被直接删除、不进入安装流程。
 
 五步流水线，每步状态落在 `~/.workbuddy/acquire_state.json`（`$SKILL_ROUTER_ACQUIRE_STATE` 可改路径），中断后可 `resume` 续跑：
 
 ```
-find    → finder.search()         SkillHub 按关键词召回候选
+find    → finder.search()         从受信发布表按 slug+版本解析候选（禁止动态 latest）
 audit   → security_check.audit()  文件操作/网络外发/硬编码密钥/Shell执行 分级
 confirm → 自动安装安全技能包（仅 P1/P2 通过，P0 直接报错退出）
 install → 下载 zip 解压到 ~/.workbuddy/skills/<slug>（含 zip-slip 防护）
@@ -225,7 +225,7 @@ register→ registry.scan() 刷新索引（失败仅标记 skipped，不阻断�
 用法：
 
 ```bash
-"$PY" "$S/acquire.py" run --query "把调研写成海报" --slug poster
+"$PY" "$S/acquire.py" run --query skill-radoute --version v1.5.0   # 显式锁定版本，走 GitHub Releases + 哈希校验
 "$PY" "$S/acquire.py" run --query "海报" --auto          # 半自动，仅自动安装 P1/P2 安全包
 "$PY" "$S/acquire.py" resume                            # 中断后续跑，从首未完成步
 "$PY" "$S/acquire.py" reset                             # 放弃当前会话，回到空白
@@ -235,7 +235,7 @@ register→ registry.scan() 刷新索引（失败仅标记 skipped，不阻断�
 
 > 高风险技能包（P0）需交互模式确认，不受 `--auto`/`--force` 影响。`--force` 仅用于覆盖已安装目录，绝不绕过 P0 安全确认。
 
-注：GitHub 检索为预留槽位，当前 `--source` 仅 `skillhub`。
+注：当前 `--source` 仅 `github`（签名 Release）。新技能须先在 `finder.TRSTED_RELEASES` 登记受信 repo，并在 `acquire.KNOWN_SKILLS` 预置哈希，否则获取时提示“请联系作者更新”。SkillHub 官方 registry 端点就绪后可作为补充来源，但仍需版本锁定 + 哈希校验。
 
 ---
 

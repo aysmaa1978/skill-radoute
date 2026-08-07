@@ -6,7 +6,7 @@
 
 **方式一 · SkillHub 一键安装**
 
-在 WorkBuddy 技能市场搜索 `skill-radoute`，点击安装即可（当前 v1.4.0：CJK 短查询提权、词干泄漏收窄、停用词 n-gram 泄漏修复、call 链路冒烟测试）。
+在 WorkBuddy 技能市场搜索 `skill-radoute`，点击安装即可（当前 v1.5.0：`route --explain` 透明报告 + 轻量语义同义词匹配）。
 
 **方式二 · GitHub 手动安装**
 
@@ -119,7 +119,7 @@ skill-radoute/
 ├── scripts/
 │   ├── registry.py           # 技能索引与打分（五类来源扫描）
 │   ├── router.py             # 会话/路由/上下文/调用链
-│   ├── finder.py             # acquire: SkillHub 检索与归一化
+│   ├── finder.py             # acquire: 受信发布表解析（GitHub Releases）
 │   ├── security_check.py     # acquire: 安全审计分级
 │   ├── acquire_state.py      # acquire: 状态持久化与中断恢复
 │   ├── acquire.py            # acquire: 五步流水线主控
@@ -141,6 +141,16 @@ skill-radoute/
 - **call 链路冒烟测试**：新增 `test_call_chain.py`（16 断言，覆盖 open/close/switch/resume 与栈状态），可捕获 d449b38 类静默回归；`test_scoring.py` 锁定 14 条打分不变量。
 - 回归：54 例全量测试仅 1 处差异且为改进，clear 集 auto 率 51.6%→54.8%，零退化。
 
+### v1.5.0
+- **`route --explain` 透明路由报告**：新增 `--explain` 标志，输出 `top_candidates`（候选技能列表）、`score_breakdown`（每个候选的名称/描述/标签分项 + 语义同义命中）、`decision_reason`（为何 auto / confirm / no_match / decompose），若为 `confirm` 额外给出 `missing_trigger`（为何没自动选中，如分数低于阈值、领先幅度不足、同族冲突）。输出 `json.dumps(indent=2)`，仅解释用，不动正常路由的 emitschema（新增 `test_explain.py` 14 断言锁契约）。
+- **轻量语义匹配（同义词提升）**：`registry.py` 引入预置中英同义词表（search↔查找/搜索/检索、draw↔画图/绘制/绘图、write↔撰写/创作/写作），查询词与技能自身 token 落入同一同义组时按 `SEMANTIC_WEIGHT=0.3` 加权重分。纯数据驱动、无嵌入模型、零新依赖；加分仅当「技能本身含同组成员」触发，故无关技能拿不到语义分，杜绝误判。
+- 验收：54 例全量回归与 v1.4 基线**零决策差异**，clear 集 auto 率维持 54.8% 不降；`查找最新的AI新闻` / `search the web for ai news` 均将 tavily 识别为首选；跨语种变体 `帮我检索一下今天的人工智能新闻` 经同义词正确拉升 tavily（`sem_gain=0.3`）。
+- **弱匹配守卫（no_match 复活）**：`router.py` 新增 weak-match guard——top1 分数 < 0.5 或命中理由全部为单字/停用词时直接判 `no_match` 并走远程获取链路，越界输入不再被错误技能「伪装成可确认」；守卫停用词表已收窄（仅保留冠词/代词/介词等功能词，移出 `create/new/make` 等动作动词），消除 `create a new skill` 被误判丢弃正确技能的问题。54 例真实回归：2 例越界精准复活、0 例误伤（确定性 100%，3 轮逐字节一致）。
+- **（云鼎安全修复）可信下载源**：移除未经验证的 `lightmake.site` CDN；`finder.py` 改为从「受信发布表」`TRUSTED_RELEASES` 按 slug + 显式版本解析，下载 URL 统一走带签名的 GitHub Releases（`GITHUB_RELEASE`）。SkillHub 官方 registry 端点就绪前，GitHub Releases 即为可信备用源。
+- **（云鼎安全修复）SHA256 哈希校验**：`acquire.py` 下载后比对 zip 的 SHA256 与硬编码在 `KNOWN_SKILLS` 的预期值（绝不从远程获取）。未预置哈希或哈希不匹配的包直接删除并报错退出，不进入安装流程。
+- **（云鼎安全修复）版本锁定 + 人工确认**：获取请求必须显式携带版本号（禁止仅凭 slug 动态解析 `latest`）；P0 高风险包恒需交互确认，`--auto`/`--force` 均不绕过；`--auto` 模式仅对「已预置哈希且版本锁定」的技能自动获取，其余降级为人工确认。
+- 验收（安全）：新技能下载走 GitHub Releases + 哈希校验；已预置哈希的技能安装成功，未预置的报错退出并提示“请联系作者更新”；云鼎复扫时三个问题点均消除。
+
 ### v1.3.0
 - **兄弟技能消歧**：top1 与 top2 同 tier 且名称前缀重叠（同族）时强制 `confirm`，不再靠分数硬选，`reason` 标 `[SIBLING]`。修复 PowerPoint / tencent-doc / edit-word / weixin-pay 等同族技能被误自动选中的问题。
 - **多意图检测**：`route` 每次都跑 `intent.parse`，解析出 ≥2 个不同任务类型时返回 `decompose` 并附 `sub_task_plan`（每子任务类型 + 建议技能），不再盲目取 top1。多意图是 query 的属性，与候选强弱无关，优先级高于 `auto` / `no_match` / 弱匹配；`[SIBLING]` 仍为最高优先。
@@ -150,7 +160,7 @@ skill-radoute/
 - **弱匹配守卫停用词收窄**：移除 `create/new/make/build/run/use/go` 等动作动词，仅保留无意义功能词，修复 `create a new skill` 被误判 `no_match` 丢弃正确技能的问题。
 - **远程获取完整性校验**：`acquire.py` 下载 zip 后校验可读且含 `SKILL.md`，损坏/伪造包自动删除并报错，不进安装流程。
 - **获取链路安全收紧**：P0 高危包恒需交互确认，`--auto`/`--force` 均不绕过；`--force` 仅覆盖已安装目录。
-- **文档**：补充 `lightmake.site` 为 SkillHub 官方 CDN 端点说明；`--auto`/`--force` 表述与代码对齐。
+- **文档**：`--auto`/`--force` 表述与代码对齐（注：`lightmake.site` 源已于 v1.5 移除，改用带签名 GitHub Releases + SHA256 校验）。
 
 ### v1.2
 - 上下文池版本化（`ctx history` / `ctx rollback`）。

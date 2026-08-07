@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
-"""Remote skill finder: query SkillHub and return normalized candidates.
+"""Remote skill finder: resolve a trusted, version-pinned download URL.
 
-Part of skill-radoute v1.1 remote-acquisition chain.
+Part of skill-radoute v1.5 remote-acquisition chain.
 Step 1 of: find -> audit -> confirm -> install -> register.
+
+v1.5 (云鼎安全修复):
+  * Removed the untrusted `lightmake.site` CDN (no signature, no pinning).
+  * Discovery is now a *trusted release table* lookup, not keyword scraping
+    of an unverified API. The download URL is built from an explicit version
+    + a known-good GitHub repo, so nothing is resolved dynamically by slug
+    alone (云鼎 fix ③: version pinning).
+  * GitHub Releases is the trusted, signed source. SkillHub's official
+    registry endpoint is not available yet, so it is the fallback.
 
 Design notes:
   * Pure module. No side effects: it does NOT touch trace.jsonl, the
-    filesystem, or the registry. The acquire.py orchestrator owns those
-    so this stays trivially testable and replayable.
-  * Only SkillHub is wired up. GitHub is a declared backup source but
-    intentionally NOT implemented yet (dispatcher raises
-    NotImplementedError) so the call contract stays fixed for later stages.
-  * No third-party deps: stdlib urllib only.
+    filesystem, or the registry. acquire.py owns those.
+  * No third-party deps: stdlib only.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-import urllib.parse
-import urllib.request
-
-API_BASE = "https://lightmake.site/api/v1"
-SEARCH_URL = API_BASE + "/search"
-DEFAULT_MIN_SCORE = 0.05  # SkillHub noise floor (see find-skills reference)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -31,101 +30,72 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 class FinderError(RuntimeError):
-    """Recoverable caller error (empty query, bad arg)."""
+    """Recoverable caller error (empty query, unknown slug, no version)."""
 
 
-def _http_json(url: str, timeout: int = 20):
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "skill-radoute/1.1", "Accept": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
+# Trusted, signed GitHub Releases. SkillHub official registry endpoint not
+# yet available -> this is the trusted fallback source (云鼎 fix ①).
+GITHUB_RELEASE = (
+    "https://github.com/aysmaa1978/skill-radoute"
+    "/releases/download/v{version}/skill-radoute.skill.zip"
+)
 
-
-def _as_float(v, default: float = 0.0) -> float:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return default
-
-
-def _as_int(v) -> int:
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return 0
-
-
-def normalize_skillhub(item: dict) -> dict:
-    """Map one SkillHub result item into the shared candidate shape.
-
-    The normalized record is the contract every later stage (audit, install,
-    register) consumes, so it must carry enough to display, download and
-    register without re-calling the API.
-    """
-    ns = item.get("namespace") or {}
-    labels = item.get("labels") or {}
-    desc = (
-        item.get("description_zh")
-        or item.get("description")
-        or item.get("summary")
-        or ""
-    ).strip()
-    slug = item.get("slug", "")
-    return {
-        "name": item.get("name", ""),
-        "slug": slug,
-        "display_name": item.get("displayName") or item.get("name", ""),
-        "description": desc,
-        "version": item.get("version", ""),
-        "source": "skillhub",
-        "source_raw": item.get("source", ""),
-        "category": item.get("category", ""),
-        "owner": ns.get("handle") or item.get("owner_name", ""),
-        "score": _as_float(item.get("score")),
-        "downloads": _as_int(item.get("downloads")),
-        "installs": _as_int(item.get("installs")),
-        "stars": _as_int(item.get("stars")),
-        "requires_api_key": str(labels.get("requires_api_key", "false")).lower() == "true",
-        "homepage": item.get("homepage", ""),
-        "download_url": f"{API_BASE}/download?slug={urllib.parse.quote(slug)}",
-        "updated_at": _as_int(item.get("updated_at") or item.get("updatedAt") or 0),
-    }
-
-
-def search_skillhub(query: str, limit: int = 10,
-                    min_score: float = DEFAULT_MIN_SCORE, timeout: int = 20) -> list[dict]:
-    q = (query or "").strip()
-    if not q:
-        raise FinderError("empty query")
-    url = f"{SEARCH_URL}?q={urllib.parse.quote(q)}&limit={int(limit)}"
-    try:
-        data = _http_json(url, timeout=timeout)
-    except Exception as e:  # network/timeout/decode — degrade to empty, log to stderr
-        sys.stderr.write(f"[finder] skillhub search failed: {e}\n")
-        return []
-    results = (data or {}).get("results") or []
-    out = [normalize_skillhub(it) for it in results if normalize_skillhub(it)["score"] >= min_score]
-    out.sort(key=lambda x: -x["score"])
-    return out[:limit]
-
-
-# Backup source, reserved slot. Not implemented in v1.1 step 1.
-_PROVIDERS = {
-    "skillhub": search_skillhub,
-    # "github": search_github,  # TODO: backup source, wire up later
+# slug -> trusted release coordinates. A skill must be listed here (and its
+# hash preset in acquire.KNOWN_SKILLS) before it can be acquired. Version is
+# supplied at call time via --version; never resolved as `latest`.
+# To onboard a skill: author fills repo/asset, computes the zip SHA256, and
+# adds both entries. Until then acquisition of that slug is refused.
+TRUSTED_RELEASES: dict[str, dict] = {
+    "skill-radoute": {
+        "repo": "aysmaa1978/skill-radoute",
+        "asset": "skill-radoute.skill.zip",
+    },
+    # 示例（待作者补全受信 repo 与锁定版本）：
+    # "tavily": {"repo": "<owner>/tavily-skill", "asset": "tavily.skill.zip"},
+    # "poster": {"repo": "<owner>/poster-skill", "asset": "poster.skill.zip"},
 }
 
 
-def search(query: str, source: str = "skillhub", limit: int = 10,
-           min_score: float = DEFAULT_MIN_SCORE) -> list[dict]:
-    fn = _PROVIDERS.get(source)
-    if fn is None:
-        raise NotImplementedError(
-            f"source '{source}' is a declared backup but not implemented yet"
-        )
-    return fn(query, limit=limit, min_score=min_score)
+def build_release_url(slug: str, version: str) -> str:
+    """Build a signed GitHub Releases download URL. Never resolves `latest`."""
+    rel = TRUSTED_RELEASES.get(slug)
+    if not rel:
+        raise FinderError(
+            f"技能 '{slug}' 不在受信发布表，请联系作者补充（无法自动获取）")
+    if not version:
+        raise FinderError(f"获取 '{slug}' 必须显式锁定版本号（禁止动态 latest）")
+    repo = rel["repo"]
+    asset = rel.get("asset") or f"{slug}.skill.zip"
+    return f"https://github.com/{repo}/releases/download/{version}/{asset}"
+
+
+def search(query: str, source: str = "github", limit: int = 10,
+           version: str = "") -> list[dict]:
+    """Resolve a slug to a single trusted candidate.
+
+    `query` is the skill slug (explicit, no keyword scraping of an unverified
+    API). A version must be supplied so the download is pinned. Returns []
+    for an unknown slug so the caller can fall back to no_match.
+    """
+    slug = (query or "").strip()
+    if not slug:
+        raise FinderError("empty query")
+    try:
+        url = build_release_url(slug, version)
+    except FinderError:
+        return []
+    owner = TRUSTED_RELEASES[slug]["repo"].split("/")[0]
+    cand = {
+        "name": slug, "slug": slug, "display_name": slug,
+        "description": f"trusted GitHub Release {url}",
+        "version": version, "source": "github", "source_raw": "github-releases",
+        "category": "", "owner": owner,
+        "score": 1.0, "downloads": 0, "installs": 0, "stars": 0,
+        "requires_api_key": False,
+        "homepage": f"https://github.com/{TRUSTED_RELEASES[slug]['repo']}",
+        "download_url": url, "updated_at": 0,
+    }
+    return [cand][:limit]
 
 
 # --------------------------------------------------------------------- CLI
@@ -153,19 +123,19 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("search", help="search remote skills by keyword")
-    p.add_argument("query")
-    p.add_argument("--source", default="skillhub", choices=["skillhub"],
-                   help="source market (skillhub only for now)")
+    p = sub.add_parser("search", help="resolve a trusted skill release by slug")
+    p.add_argument("query", help="skill slug, e.g. skill-radoute")
+    p.add_argument("--source", default="github", choices=["github"],
+                   help="trusted source (github releases only)")
+    p.add_argument("--version", required=True,
+                   help="pinned version tag, e.g. v1.5.0 (no dynamic latest)")
     p.add_argument("--limit", type=int, default=10)
-    p.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE,
-                   help="drop results below this relevance score")
     p.add_argument("--json", action="store_true")
 
     a = ap.parse_args()
     if a.cmd == "search":
         try:
-            cands = search(a.query, source=a.source, limit=a.limit, min_score=a.min_score)
+            cands = search(a.query, source=a.source, limit=a.limit, version=a.version)
         except FinderError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1

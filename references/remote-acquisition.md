@@ -45,8 +45,9 @@ DeferExecuteTool  { action: "search", keyword: "<英文关键词>" }
 **③ 直接查开源来源**
 
 ```bash
-# SkillHub
-curl -s "https://lightmake.site/api/v1/search?q=<urlencoded>&limit=10"
+# ⚠️ v1.5 起禁用未经验证的 lightmake.site CDN。受信来源统一走带签名的
+# GitHub Releases，且必须显式锁定版本 + 下载后做 SHA256 校验（见 acquire.KNOWN_SKILLS）。
+# 受信发布表见 finder.TRSTED_RELEASES；未在表内/未预置哈希的 slug 一律拒绝。
 
 # GitHub（有 GITHUB_TOKEN 时带上认证，否则只搜仓库）
 curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -120,9 +121,12 @@ router.py acquire-log --skill <name> --origin "<url>" --audit P2 --path "<dir>" 
 DeferExecuteTool { toolName: "workbuddy_marketplace_skill",
                    params: { action: "install", skillId: "<id>" } }
 
-# SkillHub / ClawHub zip
+# 受信 GitHub Releases（必须锁定版本 <version>，禁止 latest）
+# 下载后务必校验 SHA256 与 acquire.KNOWN_SKILLS 预置值一致再解压。
 TMP=$(mktemp -d)
-curl -L -o "$TMP/s.zip" "https://lightmake.site/api/v1/download?slug=<slug>"
+curl -L -o "$TMP/s.zip" \
+  "https://github.com/<owner>/<repo>/releases/download/<version>/<slug>.skill.zip"
+sha256sum "$TMP/s.zip"   # 与 KNOWN_SKILLS 预期值比对
 mkdir -p "<target>/<slug>" && unzip -o "$TMP/s.zip" -d "<target>/<slug>" && rm -rf "$TMP"
 
 # GitHub
