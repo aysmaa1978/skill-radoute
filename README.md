@@ -6,7 +6,7 @@
 
 **方式一 · SkillHub 一键安装**
 
-在 WorkBuddy 技能市场搜索 `skill-radoute`，点击安装即可（当前 v1.2.1 安全补丁版：弱匹配停用词收窄、远程获取完整性校验、获取链路安全收紧）。
+在 WorkBuddy 技能市场搜索 `skill-radoute`，点击安装即可（当前 v1.3.0：兄弟技能消歧、多意图检测、call close 修复）。
 
 **方式二 · GitHub 手动安装**
 
@@ -131,6 +131,11 @@ skill-radoute/
 ```
 
 ## 更新日志
+
+### v1.3.0
+- **兄弟技能消歧**：top1 与 top2 同 tier 且名称前缀重叠（同族）时强制 `confirm`，不再靠分数硬选，`reason` 标 `[SIBLING]`。修复 PowerPoint / tencent-doc / edit-word / weixin-pay 等同族技能被误自动选中的问题。
+- **多意图检测**：`route` 每次都跑 `intent.parse`，解析出 ≥2 个不同任务类型时返回 `decompose` 并附 `sub_task_plan`（每子任务类型 + 建议技能），不再盲目取 top1。多意图是 query 的属性，与候选强弱无关，优先级高于 `auto` / `no_match` / 弱匹配；`[SIBLING]` 仍为最高优先。
+- 修复 call close 命令中 stack 弹出逻辑（回归于 d449b38）。
 
 ### v1.2.1（安全补丁）
 - **弱匹配守卫停用词收窄**：移除 `create/new/make/build/run/use/go` 等动作动词，仅保留无意义功能词，修复 `create a new skill` 被误判 `no_match` 丢弃正确技能的问题。

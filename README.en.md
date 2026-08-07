@@ -6,7 +6,7 @@ A meta-skill router. Within a single session it discovers, selects, invokes and 
 
 **Option 1 · One-click via SkillHub**
 
-Search `skill-radoute` in the WorkBuddy skill marketplace and click install. (Current release: **v1.2.1 security patch** — narrowed weak-match stopwords, remote-acquisition integrity check, tightened acquisition safety.)
+Search `skill-radoute` in the WorkBuddy skill marketplace and click install. (Current release: **v1.3.0** — sibling disambiguation, multi-intent detection, `call close` fix.)
 
 **Option 2 · Manual install from GitHub**
 
@@ -131,6 +131,11 @@ skill-radoute/
 ```
 
 ## Changelog
+
+### v1.3.0
+- **Sibling disambiguation**: when top1 and top2 share the same tier and overlapping name prefixes (same family), the decision is forced to `confirm` instead of being decided by score, with `reason` tagged `[SIBLING]`. Fixes same-family skills (PowerPoint / tencent-doc / edit-word / weixin-pay) being auto-selected incorrectly.
+- **Multi-intent detection**: `route` now always runs `intent.parse`; when ≥2 distinct task types are parsed it returns `decompose` with a `sub_task_plan` (per-subtask type + suggested skills) instead of blindly taking top1. Multi-intent is a property of the query, independent of candidate strength, so it outranks `auto` / `no_match` / weak-match; `[SIBLING]` still has the highest priority.
+- Fixed the stack-pop logic in the `call close` command (regression introduced in d449b38).
 
 ### v1.2.1 (Security Patch)
 - **Narrowed weak-match stopwords**: removed action verbs such as `create/new/make/build/run/use/go`; kept only meaningless function words, fixing `create a new skill` being misclassified as `no_match` and dropping the correct skill.
