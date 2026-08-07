@@ -125,7 +125,8 @@ skill-radoute/
 │   ├── acquire.py            # acquire: 五步流水线主控
 │   ├── intent.py             # v1.2 需求雷达：自然语言 → 结构化任务
 │   ├── sentinel.py           # v1.2 边界哨兵：安全/能力/资源检查
-│   └── test_call_chain.py    # call 生命周期冒烟测试（python3 scripts/test_call_chain.py）
+│   ├── test_call_chain.py    # call 生命周期冒烟测试（python3 scripts/test_call_chain.py）
+│   └── test_scoring.py       # 打分层不变量测试（CJK 归一化/词干门槛/停用词泄漏）
 ├── references/               # 路由规则、封套契约、远程获取协议
 ├── LICENSE                   # MIT
 └── README.md

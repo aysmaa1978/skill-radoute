@@ -14,6 +14,7 @@ Override builtin root with env SKILL_ROUTER_BUILTIN_DIR.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -272,6 +273,14 @@ _STOP = {
     "the", "a", "an", "of", "for", "to", "and", "or", "with", "use", "using",
     "when", "skill", "help", "me", "my", "please", "i", "it", "is", "on", "in",
     "帮", "我", "的", "了", "个", "一", "是", "要", "请", "把", "给", "用",
+    # 纯功能字：代词/疑问/助词/程度副词。只在 n-gram 全由功能字组成时才整体丢弃，
+    # 所以这里放宽是安全的；带路由信号的字（做/写/画/查/图/文/中/看）绝不入列。
+    "你", "他", "她", "它", "们", "咱", "谁", "哪", "什", "么", "怎", "样",
+    "呢", "吗", "吧", "啊", "呀", "嘛", "着", "地", "得", "有", "在", "和",
+    "与", "及", "或", "但", "而", "且", "就", "都", "也", "还", "才", "只",
+    "又", "很", "太", "更", "最", "这", "那", "此", "该", "些", "想", "让",
+    "被", "从", "对", "向", "为", "以", "于", "之", "者", "其", "会", "能",
+    "可", "二", "三",
 }
 
 
@@ -282,8 +291,13 @@ def tokenize(text: str) -> dict:
     toks: dict = {}
 
     def bump(t: str, w: float) -> None:
-        if t and t not in _STOP:
-            toks[t] = max(toks.get(t, 0.0), w)
+        if not t or t in _STOP:
+            return
+        # 停用词经 n-gram 组合泄漏回来：帮/我 各自被过滤，"帮我" 却照样入池，
+        # 于是 "帮我遛狗"/"今天天气怎么样" 靠纯语法碎片拿到高分。整串都是功能字就丢弃。
+        if len(t) > 1 and _CJK.match(t) and all(c in _STOP for c in t):
+            return
+        toks[t] = max(toks.get(t, 0.0), w)
 
     for w in _WORD.findall(text):
         if len(w) > 1:
@@ -296,6 +310,35 @@ def tokenize(text: str) -> dict:
         for i in range(len(run) - 2):
             bump(run[i:i + 3], 1.2)
     return toks
+
+
+@functools.lru_cache(maxsize=256)
+def query_mass(text: str) -> float:
+    """Semantic size of a query: one latin word = 1, CJK ≈ 1 per 2 chars.
+
+    Used as the scoring denominator instead of the raw token sum. CJK expands
+    into singles+bigrams+trigrams (6 chars -> 15 tokens, mass 11.6), which used
+    to inflate the denominator and hand CJK queries a ~35% score penalty versus
+    an identical latin query. Measuring the query in semantic units instead
+    puts the two at parity.
+    """
+    text = (text or "").lower()
+    latin = sum(1 for w in _WORD.findall(text) if len(w) > 1 and w not in _STOP)
+    cjk = sum(len(r) for r in re.findall(r"[\u4e00-\u9fff]+", text))
+    return latin + cjk / 2.0
+
+
+def _stem_match(q: str, d: str) -> bool:
+    """Prefix match that keeps inflections but rejects unrelated stems.
+
+    Bare bidirectional prefix at len>=4 leaked badly: data~database,
+    auto~automation, mark~marketplace, word~wordpress all matched. Requiring
+    the shared prefix to cover >50% of the longer token keeps the intended
+    debug~debugging / publish~publisher while dropping those.
+    """
+    if not (d.startswith(q) or q.startswith(d)):
+        return False
+    return min(len(q), len(d)) / max(len(q), len(d)) > 0.5
 
 
 def _overlap(qt: dict, dt: dict, idf: dict) -> tuple[float, list[str]]:
@@ -311,7 +354,7 @@ def _overlap(qt: dict, dt: dict, idf: dict) -> tuple[float, list[str]]:
         elif len(q) >= 4 and q.isascii():
             gain = 0.0
             for d in dkeys:
-                if d.startswith(q) or q.startswith(d):
+                if _stem_match(q, d):
                     gain = max(gain, qw * dt[d] * idf.get(d, 1.0) * 0.7)
             if not gain:
                 continue
@@ -366,8 +409,9 @@ def score_skill(qtoks: dict, query_lc: str, rec: dict,
         why.append("描述命中: " + ",".join(hit_d[:8]))
     if raw <= 0:
         return 0.0, why
-    # normalize against query size so long queries do not inflate scores
-    norm = raw / (sum(qtoks.values()) ** 0.5 + 3.0)
+    # normalize against query size so long queries do not inflate scores.
+    # query_mass, not sum(qtoks): CJK n-gram expansion otherwise deflates scores.
+    norm = raw / (query_mass(query_lc) ** 0.5 + 3.0)
     final = norm * TIER_WEIGHT.get(rec.get("tier", "user"), 0.8)
     return round(final, 4), why
 
