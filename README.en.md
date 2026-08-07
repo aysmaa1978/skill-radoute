@@ -124,7 +124,8 @@ skill-radoute/
 │   ├── acquire_state.py      # acquire: state persistence & resume
 │   ├── acquire.py            # acquire: five-step pipeline controller
 │   ├── intent.py             # v1.2 intent radar: natural language → structured task
-│   └── sentinel.py           # v1.2 boundary sentinel: security/capability/resource check
+│   ├── sentinel.py           # v1.2 boundary sentinel: security/capability/resource check
+│   └── test_call_chain.py    # call lifecycle smoke test (python3 scripts/test_call_chain.py)
 ├── references/               # routing rules, envelope contract, remote-acquisition protocol
 ├── LICENSE                   # MIT
 └── README.md
