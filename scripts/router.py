@@ -34,6 +34,8 @@ AUTO_THRESHOLD = 1.2   # top1 score must clear this to auto-execute
 AUTO_MARGIN = 1.30     # top1 must beat top2 by this ratio
 CALL_STATES = ("open", "suspended", "ok", "failed", "partial", "skipped")
 
+__version__ = "1.6.0"  # skill-radoute v1.6.0（Bug 修复 + 非交互防护 + 失败退出码）
+
 
 # --------------------------------------------------------------------- helpers
 
@@ -369,8 +371,8 @@ def cmd_route(a) -> int:
 
     cands = registry.search(a.task, top=a.top,
                              with_detail=getattr(a, "explain", False))
-    exclude = set(a.exclude or [])
-    cands = [c for c in cands if c["name"] not in exclude]
+    exclude = {e.lower() for e in (a.exclude or [])}   # 大小写不敏感
+    cands = [c for c in cands if c["name"].lower() not in exclude]
 
     decision, chosen, reason = "no_match", None, ""
     sub_plan = None
@@ -538,7 +540,10 @@ def cmd_call_close(a) -> int:
         save_ctx(sid, ctx)
     s = load_session(sid)
     s["stack"] = [x for x in s.get("stack", []) if x != cid]
-    s["current_skill"] = calls[s["stack"][-1]]["skill"] if s["stack"] else None
+    # 栈空时不回退 current_skill：switch --keep-open 挂起调用后关闭它时，
+    # current_skill 仍是 switch 目标技能，不应被清空。
+    if s["stack"]:
+        s["current_skill"] = calls[s["stack"][-1]]["skill"]
     save_session(sid, s)
     emit({"call_id": cid, "status": a.status, "stack": s["stack"],
           "current_skill": s["current_skill"]})

@@ -39,10 +39,15 @@ SKILLS_DIR = Path.home() / ".workbuddy" / "skills"
 # 下方 tavily/poster 为初始预置示例；其哈希为占位符，作者补全真实
 # 发布包哈希前，这两项的获取会被拒绝并提示「请联系作者更新」。
 KNOWN_SKILLS: dict[str, str] = {
-    "tavily": "sha256:abc123...",   # 初始预置（占位，待作者用 sha256sum <zip> 补真实哈希）
-    "poster": "sha256:def456...",   # 初始预置（占位，待作者用 sha256sum <zip> 补真实哈希）
-    # 路由器自身自更新：vX.Y.Z 的哈希在下一版记录（避免「鸡生蛋」自举悖论），
-    # 即本版 KNOWN_SKILLS 不内嵌自身哈希，待 v1.6.0 再补。
+    # 路由器自身自更新：v1.6.0 发布包真实 SHA256（由 sha256sum 计算，
+    # 已核对 skill-radoute-v1.6.0.skill.zip 实测值）。哈希硬编码、绝不来自网络；
+    # 自举约定：本版源码记录本版发布包哈希（包内不内嵌自身哈希，避免鸡生蛋），
+    # 供下一版引用，自更新链路可端到端跑通。
+    "skill-radoute": "sha256:bba2be8311babfdbdbcc31c3ed9bc3ee5ec8ecbd2bc76a0c2357735368cd466b",
+    # 以下为待作者补全真实发布包哈希的示例位；补全前获取会被拒绝并
+    # 提示「请联系作者更新」。占位串不可匹配任何真实 zip，故必然失败退出。
+    "tavily": "sha256:abc123...",   # 待作者用 sha256sum <tavily 发布包> 补真实哈希
+    "poster": "sha256:def456...",   # 待作者用 sha256sum <poster 发布包> 补真实哈希
 }
 TRACE_FILE = Path(os.environ.get(
     "SKILL_ROUTER_ACQUIRE_TRACE",
@@ -130,9 +135,25 @@ def _download(sel: dict) -> Path:
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True, exist_ok=True)
     zip_path = work / f"{sel['slug']}.zip"
-    req = urllib.request.Request(url, headers={"User-Agent": "skill-radoute/1.5"})
-    with urllib.request.urlopen(req, timeout=90) as r, open(zip_path, "wb") as f:
-        shutil.copyfileobj(r, f)
+    req = urllib.request.Request(url, headers={"User-Agent": "skill-radoute/1.6"})
+    # 国内网络适配：优先读 GITHUB_PROXY，其次标准 HTTPS_PROXY/HTTP_PROXY。
+    # urllib 默认不识别自定义变量 GITHUB_PROXY，这里显式装配 ProxyHandler。
+    proxy = (os.environ.get("GITHUB_PROXY")
+             or os.environ.get("HTTPS_PROXY")
+             or os.environ.get("HTTP_PROXY"))
+    opener = (urllib.request.build_opener(
+        urllib.request.ProxyHandler({"https": proxy, "http": proxy}))
+        if proxy else None)
+    opener_open = opener.open if opener else urllib.request.urlopen
+    try:
+        with opener_open(req, timeout=90) as r, open(zip_path, "wb") as f:
+            shutil.copyfileobj(r, f)
+    except Exception as e:  # 网络超时/不可达：给出可操作的友好提示
+        os.remove(zip_path) if zip_path.exists() else None
+        hint = ""
+        if isinstance(e, (TimeoutError,)) or "timed out" in str(e).lower():
+            hint = "（网络超时）请检查连接，或设置 GITHUB_PROXY=http://代理地址 后重试。"
+        raise RuntimeError(f"下载失败：{e}{hint}")
     # --- 云鼎修复②: SHA256 校验（硬编码预期值，绝不从远程获取）---
     # 未预置 / 不匹配 -> 删除文件并抛错，绝不进入安装流程。
     _verify_hash(zip_path, sel["slug"])
@@ -155,17 +176,22 @@ def _download(sel: dict) -> Path:
 
 def _run_find(state: dict, args) -> list:
     st.set_step(state, "find", "in_progress")
-    version = args.version or st.get_ctx(state, "version") or ""
+    # resume 子命令没有 --query/--source/--limit：从上次会话 context 回退读取，
+    # 与 version 的处理保持一致（防止 AttributeError 崩溃）。
+    query = getattr(args, "query", None) or st.get_ctx(state, "query")
+    source = getattr(args, "source", None) or st.get_ctx(state, "source") or "github"
+    limit = getattr(args, "limit", None) or st.get_ctx(state, "limit") or 10
+    version = getattr(args, "version", None) or st.get_ctx(state, "version") or ""
     try:
-        cands = finder.search(args.query, source=args.source,
-                              limit=args.limit, version=version)
+        cands = finder.search(query, source=source,
+                              limit=limit, version=version)
     except finder.FinderError as e:
         st.set_step(state, "find", "failed")
         raise _NeedAuthor(str(e))
-    st.set_ctx(state, candidates=cands, query=args.query,
-               source=args.source, version=version)
+    st.set_ctx(state, candidates=cands, query=query,
+               source=source, version=version, limit=limit)
     st.set_step(state, "find", "done")
-    trace("acquire_find", query=args.query, source=args.source,
+    trace("acquire_find", query=query, source=source,
           version=version, count=len(cands))
     return cands
 
@@ -173,7 +199,8 @@ def _run_find(state: dict, args) -> list:
 def _run_audit(state: dict, args):
     st.set_step(state, "audit", "in_progress")
     cands = st.get_ctx(state, "candidates") or []
-    sel = _pick(cands, args.slug)
+    # resume 子命令没有 --slug：回退到上次会话锁定的 slug
+    sel = _pick(cands, getattr(args, "slug", None) or st.get_ctx(state, "slug"))
     if not sel:
         trace("acquire_audit", error="no_candidate")
         st.set_step(state, "audit", "failed")
@@ -184,11 +211,20 @@ def _run_audit(state: dict, args):
         st.set_step(state, "audit", "failed")
         raise                       # _pipeline surfaces it via _fail
     report = security_check.audit(str(dl))
-    st.set_ctx(state, selected=sel, audit=report, download_path=str(dl))
+    st.set_ctx(state, selected=sel, audit=report, download_path=str(dl),
+               slug=sel["slug"])
     st.set_step(state, "audit", "done")
     trace("acquire_audit", slug=sel["slug"], risk=report["risk"],
           verdict=report["verdict"], findings=len(report["findings"]))
     return sel, report, dl
+
+
+def _ask(prompt: str) -> str:
+    """交互确认输入：非交互环境（stdin 关闭抛 EOFError）视为拒绝，不崩溃。"""
+    try:
+        return input(prompt).strip().lower()
+    except EOFError:
+        return "n"
 
 
 def _run_confirm(state: dict, args, sel: dict, report: dict) -> bool:
@@ -198,11 +234,13 @@ def _run_confirm(state: dict, args, sel: dict, report: dict) -> bool:
     # 高风险技能包（P0）必须交互确认，--auto / --force 均不影响此拦截。
     # --force 仅用于覆盖已安装目录（见 _run_install），绝不绕过 P0 安全确认。
     if v == "P0":
+        # P0 高危包恒需人工确认：--auto 非交互模式下无法确认，一律拒绝
+        # （--auto/--force 均不绕过，预置哈希也不例外）。
         if args.auto:
             trace("acquire_confirm", decision="rejected", reason="P0_under_auto")
             st.set_step(state, "confirm", "failed")
             return False
-        ans = input(f"[HIGH risk {report['risk']}] install anyway? [y/N] ").strip().lower()
+        ans = _ask(f"[HIGH risk {report['risk']}] install anyway? [y/N] ")
         if ans != "y":
             trace("acquire_confirm", decision="rejected")
             st.set_step(state, "confirm", "failed")
@@ -210,14 +248,14 @@ def _run_confirm(state: dict, args, sel: dict, report: dict) -> bool:
     elif args.auto and not preset:
         # 云鼎修复③：--auto 仅对「已预置哈希且版本锁定」的技能生效；
         # 其余一律降级为人工确认，不自动获取。
-        ans = input(f"[not pinned/preset] confirm install of {sel['slug']}? [y/N] ").strip().lower()
+        ans = _ask(f"[not pinned/preset] confirm install of {sel['slug']}? [y/N] ")
         if ans != "y":
             trace("acquire_confirm", decision="rejected",
                   reason="auto_requires_preset_and_pinned")
             st.set_step(state, "confirm", "failed")
             return False
     elif v == "P1" and not args.auto:
-        ans = input(f"[MEDIUM risk] confirm install? [Y/n] ").strip().lower()
+        ans = _ask(f"[MEDIUM risk] confirm install? [Y/n] ")
         if ans == "n":
             trace("acquire_confirm", decision="rejected")
             st.set_step(state, "confirm", "failed")
@@ -264,7 +302,7 @@ def _run_register(state: dict, args, sel: dict) -> bool:
     return ok
 
 
-def _pipeline(state: dict, args, start: str) -> None:
+def _pipeline(state: dict, args, start: str) -> int:
     steps = ("find", "audit", "confirm", "install", "register")
     idx = steps.index(start)
     sel = st.get_ctx(state, "selected")
@@ -301,12 +339,14 @@ def _pipeline(state: dict, args, start: str) -> None:
     name = sel.get("slug") or sel.get("name")
     trace("acquire_done", session=state["session_id"], name=name)
     print(f"done. '{name}' installed at {SKILLS_DIR / name}")
+    return 0
 
 
-def _fail(state: dict, msg: str) -> None:
+def _fail(state: dict, msg: str) -> int:
     trace("acquire_failed", reason=msg)
     print(f"aborted: {msg}", file=sys.stderr)
     print("resume with: python acquire.py resume", file=sys.stderr)
+    return 1
 
 
 def main() -> int:
@@ -341,13 +381,13 @@ def main() -> int:
         else:
             print("session in progress; use `resume` or `--force-new`", file=sys.stderr)
             return 2
-        _pipeline(state, a, "find")
+        return _pipeline(state, a, "find")
     elif a.cmd == "resume":
         state = st.load()
         if st.is_complete(state) or state.get("session_id") is None:
             print("nothing to resume")
             return 0
-        _pipeline(state, a, st.resume_step(state) or "find")
+        return _pipeline(state, a, st.resume_step(state) or "find")
     elif a.cmd == "status":
         st._print(st.load(), a.json)
     elif a.cmd == "reset":

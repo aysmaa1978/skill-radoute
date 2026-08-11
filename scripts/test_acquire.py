@@ -51,7 +51,7 @@ def test_finder():
     url = finder.build_release_url("skill-radoute", "v1.5.0")
     check("release url is signed GitHub Releases",
           url == "https://github.com/aysmaa1978/skill-radoute"
-                 "/releases/download/v1.5.0/skill-radoute.skill.zip")
+                 "/releases/download/v1.5.0/skill-radoute-v1.5.0.skill.zip")
     # unknown slug -> refused (no untrusted CDN fallback)
     try:
         finder.build_release_url("ghost", "v1.0.0")
@@ -184,6 +184,23 @@ def test_confirm():
         a2.force = False
         check("P0 under --auto -> rejected",
               acquire._run_confirm({}, a2, {"slug": "x", "version": "v1.0.0"},
+                                    {"verdict": "P0", "risk": "high"}) is False)
+        # P0 + --auto + preset -> rejected（预置哈希不豁免 P0 人工确认）
+        a3 = A()
+        a3.auto = True
+        a3.force = False
+        check("P0 + --auto + preset -> rejected",
+              acquire._run_confirm({}, a3, {"slug": "demo", "version": "v1.0.0"},
+                                    {"verdict": "P0", "risk": "high"}) is False)
+        # 非交互环境（stdin 关闭抛 EOFError）视为拒绝，不崩溃
+        a4 = A()
+        a4.auto = False
+        a4.force = False
+        def _eof(prompt=""):
+            raise EOFError()
+        builtins.input = _eof
+        check("P0 + EOFError stdin -> rejected without crash",
+              acquire._run_confirm({}, a4, {"slug": "demo", "version": "v1.0.0"},
                                     {"verdict": "P0", "risk": "high"}) is False)
         # non-preset under --auto -> degrades to manual; user says no -> rejected
         builtins.input = lambda p="": "n"

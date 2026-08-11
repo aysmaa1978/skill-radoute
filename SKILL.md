@@ -210,7 +210,7 @@ S="<本技能目录>/scripts"
 
 `decision=no_match` 且本地候选全不胜任时，用 `acquire.py` 走完整获取链路，全程写入与 router trace 同格式的 `acquire_trace.jsonl`（`$SKILL_ROUTER_ACQUIRE_TRACE` 可改路径）。
 
-远程获取使用带签名的 GitHub Releases 作为可信源（`finder.GITHUB_RELEASE`），不再使用任何未经验证的第三方 CDN。下载的 zip 先做 **SHA256 哈希校验**（预期值硬编码在 `acquire.KNOWN_SKILLS`，绝不从远程获取），再做完整性校验（必须是可读 zip 且含 `SKILL.md`）；未预置哈希、哈希不匹配、或伪造的包会被直接删除、不进入安装流程。
+远程获取使用带签名的 GitHub Releases 作为可信源（`finder.TRUSTED_RELEASES` 受信发布表），不再使用任何未经验证的第三方 CDN。下载的 zip 先做 **SHA256 哈希校验**（预期值硬编码在 `acquire.KNOWN_SKILLS`，绝不从远程获取），再做完整性校验（必须是可读 zip 且含 `SKILL.md`）；未预置哈希、哈希不匹配、或伪造的包会被直接删除、不进入安装流程。
 
 五步流水线，每步状态落在 `~/.workbuddy/acquire_state.json`（`$SKILL_ROUTER_ACQUIRE_STATE` 可改路径），中断后可 `resume` 续跑：
 

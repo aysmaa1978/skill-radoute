@@ -35,10 +35,8 @@ class FinderError(RuntimeError):
 
 # Trusted, signed GitHub Releases. SkillHub official registry endpoint not
 # yet available -> this is the trusted fallback source (云鼎 fix ①).
-GITHUB_RELEASE = (
-    "https://github.com/aysmaa1978/skill-radoute"
-    "/releases/download/v{version}/skill-radoute.skill.zip"
-)
+# 下载 URL 由 build_release_url() 根据 TRUSTED_RELEASES 表拼接，此处不再保留
+# 独立模板常量（此前 GITHUB_RELEASE 为死代码，从未被引用）。
 
 # slug -> trusted release coordinates. A skill must be listed here (and its
 # hash preset in acquire.KNOWN_SKILLS) before it can be acquired. Version is
@@ -48,11 +46,13 @@ GITHUB_RELEASE = (
 TRUSTED_RELEASES: dict[str, dict] = {
     "skill-radoute": {
         "repo": "aysmaa1978/skill-radoute",
-        "asset": "skill-radoute.skill.zip",
+        # 发布包文件名带版本号（skill-radoute-v1.5.0.skill.zip），
+        # 用 {version} 占位让 URL 随版本自动生成，无需每版改表。
+        "asset": "skill-radoute-{version}.skill.zip",
     },
     # 示例（待作者补全受信 repo 与锁定版本）：
-    # "tavily": {"repo": "<owner>/tavily-skill", "asset": "tavily.skill.zip"},
-    # "poster": {"repo": "<owner>/poster-skill", "asset": "poster.skill.zip"},
+    # "tavily": {"repo": "<owner>/tavily-skill", "asset": "tavily-{version}.skill.zip"},
+    # "poster": {"repo": "<owner>/poster-skill", "asset": "poster-{version}.skill.zip"},
 }
 
 
@@ -66,6 +66,8 @@ def build_release_url(slug: str, version: str) -> str:
         raise FinderError(f"获取 '{slug}' 必须显式锁定版本号（禁止动态 latest）")
     repo = rel["repo"]
     asset = rel.get("asset") or f"{slug}.skill.zip"
+    if "{version}" in asset:                     # 文件名带版本号时自动填充
+        asset = asset.format(version=version)
     return f"https://github.com/{repo}/releases/download/{version}/{asset}"
 
 

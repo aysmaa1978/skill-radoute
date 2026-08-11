@@ -178,7 +178,10 @@ def read_skill(skill_md: Path, tier: str) -> dict | None:
             tags.extend(str(x) for x in v)
         elif isinstance(v, str) and v:
             tags.append(v)
-    st = skill_md.stat()
+    try:
+        st = skill_md.stat()
+    except OSError:
+        return None
     d = skill_md.parent
     return {
         "name": name,

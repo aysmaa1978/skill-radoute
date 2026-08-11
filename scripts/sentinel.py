@@ -95,7 +95,7 @@ def _resources(text: str, sub_tasks, env):
     hay = text.lower()
     types = {st.get("type") for st in (sub_tasks or [])}
     for kws, env_key in RESOURCE_NEEDS:
-        if any(k.lower() in hay for k in kws) or (kws[0].replace(" ", "") in types):
+        if any(k.lower() in hay for k in kws) or any(kw in types for kw in kws):
             if not env.get(env_key):
                 missing.append(env_key)
     return missing

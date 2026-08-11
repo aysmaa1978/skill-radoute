@@ -73,10 +73,18 @@ def main() -> int:
     check("close inner current_skill", d["current_skill"], "demo-a")
     check("output landed in ctx", j(*S, "ctx", "get", "k"), "v")
 
-    # close 外层：栈清空，current_skill 归 None
+    # close 外层：栈清空，current_skill 保留（Bug3 修复：不再清成 None）
     d = j(*S, "call", "close", "--status", "ok")
     check("close outer stack", d["stack"], [])
-    check("close outer current_skill", d["current_skill"], None)
+    check("close outer keeps current_skill", d["current_skill"], "demo-a")
+
+    # Bug3 回归：switch --keep-open 挂起调用后关闭它，current_skill 保留 switch 目标
+    j(*S, "call", "open", "--skill", "demo-a", "--intent", "bug3")
+    j(*S, "switch", "--to", "demo-x", "--kind", "handoff",
+      "--reason", "bug3", "--keep-open")
+    j(*S, "call", "close", "--id", "c003", "--status", "ok")
+    check("bug3: close suspended keeps switch target",
+          j(*S, "status")["current_skill"], "demo-x")
 
     # 无可关闭调用时应报错退出，而不是静默成功
     check("close with empty stack exits nonzero",
