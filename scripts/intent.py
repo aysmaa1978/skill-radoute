@@ -57,6 +57,41 @@ TYPE_SKILLS = {
 # 类型顺序（用于稳定输出与意图标签）
 TYPE_ORDER = ["collect", "structure", "analyze", "write", "visualize", "publish", "code", "translate", "image", "video"]
 
+# v2.0: 子任务依赖图（type -> 必须先完成的 type）。用于判定多子任务能否并行：
+# 存在依赖边（如 调研->写作）必须串行；无依赖边（如 写作+画图）可并行。
+DEPENDS_ON: dict[str, tuple[str, ...]] = {
+    "collect": (),
+    "structure": ("collect",),
+    "analyze": ("collect",),
+    "write": ("collect", "structure"),
+    "publish": ("write",),
+    "visualize": (),
+    "image": (),
+    "video": (),
+    "code": (),
+    "translate": (),
+}
+
+
+def _parallel_groups(types: list[str]) -> tuple[bool, list[list[str]]]:
+    """拓扑分层：同一层的子任务互不依赖（可并行），层与层之间必须串行。
+
+    返回 (parallelizable, groups)：
+      - 单层（全部互不依赖）-> parallelizable=True，groups=[[全部]]
+      - 多层（存在依赖链）  -> parallelizable=False，groups 为分层执行计划
+    """
+    groups: list[list[str]] = []
+    remaining = list(types)
+    while remaining:
+        layer = [t for t in remaining
+                 if not any(d in remaining for d in DEPENDS_ON.get(t, ()))]
+        if not layer:          # 环路兜底（正常不会发生）
+            layer, remaining = remaining, []
+        groups.append(layer)
+        for t in layer:
+            remaining.remove(t)
+    return len(groups) == 1, groups
+
 # 模板化 target（稳定、可消费）
 TEMPLATE_TARGET = {
     "collect": "收集相关资料",
@@ -116,7 +151,8 @@ def _intent_label(types: list):
 
 
 def parse(text: str) -> dict:
-    """解析自然语言任务为结构化规格。"""
+    """解析自然语言为结构化规格。v2.0 起附带 parallelizable / parallel_groups：
+    多子任务时按依赖图分层，无依赖即可并行（供 route --parallel 与工作流引擎消费）。"""
     types = _matched_types(text)
     sub_tasks = [{"type": t, "target": TEMPLATE_TARGET[t]} for t in types]
     domain = _domain(text)
@@ -125,11 +161,14 @@ def parse(text: str) -> dict:
         for s in TYPE_SKILLS.get(t, []):
             if s not in suggested:
                 suggested.append(s)
+    parallelizable, parallel_groups = _parallel_groups(types)
     return {
         "intent": _intent_label(types),
         "domain": domain,
         "sub_tasks": sub_tasks,
         "suggested_skills": suggested,
+        "parallelizable": parallelizable,
+        "parallel_groups": parallel_groups,
     }
 
 

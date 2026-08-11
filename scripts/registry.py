@@ -23,6 +23,7 @@ import re
 import sys
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -454,6 +455,91 @@ def get_index(force: bool = False) -> dict:
     return refresh_index(force=force)
 
 
+# --------------------------------------------------------- dynamic loading
+# v2.0 按需加载：路由决策只加载候选 top3 的轻量元数据（索引已驻留，零额外
+# 读取）；执行具体技能时才加载完整内容（SKILL.md 全文 + scripts 依赖），
+# 完成后进入 LRU（保留最近 5 个），超出自动卸载最近最少使用项，控制常驻内存。
+DYNAMIC_CACHE_MAX = 5
+_loaded_skills: "OrderedDict[str, dict]" = OrderedDict()
+
+
+def load_skill_meta(slug: str) -> dict | None:
+    """按需取单个技能元数据（来自内存驻留索引，零磁盘读取）。"""
+    slug = (slug or "").lower()
+    reg = get_index()
+    for rec in reg["skills"]:
+        if rec["name"].lower() == slug or rec["dir_name"].lower() == slug:
+            return rec
+    return None
+
+
+def load_skill_full(slug: str) -> dict | None:
+    """执行技能时才调用：加载完整内容（SKILL.md 全文 + scripts/*.py 依赖），
+    入 LRU 缓存（保留最近 5 个，超出淘汰最久未用项）。"""
+    rec = load_skill_meta(slug)
+    if not rec:
+        return None
+    if slug in _loaded_skills:
+        _loaded_skills.move_to_end(slug)
+        return _loaded_skills[slug]
+    payload = dict(rec)
+    md = Path(rec["skill_md"])
+    try:
+        payload["skill_md_content"] = md.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        payload["skill_md_content"] = ""
+    scripts: list[dict] = []
+    scripts_dir = Path(rec["path"]) / "scripts"
+    if scripts_dir.is_dir():
+        for f in sorted(scripts_dir.glob("*.py")):
+            try:
+                scripts.append({"file": f.name,
+                                "content": f.read_text(encoding="utf-8", errors="replace")})
+            except OSError:
+                pass
+    payload["scripts"] = scripts
+    payload["loaded_at"] = int(time.time())
+    _loaded_skills[slug] = payload
+    _loaded_skills.move_to_end(slug)
+    while len(_loaded_skills) > DYNAMIC_CACHE_MAX:
+        _loaded_skills.popitem(last=False)   # LRU：淘汰最久未用
+    return payload
+
+
+def unload_skill(slug: str) -> bool:
+    """手动卸载一个技能（LRU 之外的双保险）。"""
+    if slug in _loaded_skills:
+        del _loaded_skills[slug]
+        return True
+    return False
+
+
+def ensure_top_loaded(cands: list, top: int = 3) -> list[str]:
+    """路由决策时只保证候选 top3 的元数据可查（索引驻留，零磁盘读取）；
+    完整脚本/依赖留给执行阶段按需 load_skill_full。"""
+    loaded = []
+    for c in (cands or [])[:top]:
+        name = c.get("name") or c.get("slug")
+        if name and load_skill_meta(name):
+            loaded.append(name)
+    return loaded
+
+
+def cache_stats() -> dict:
+    """v2.0: 当前内存中已加载（完整内容）的技能列表与字节量估算。"""
+    items, total = [], 0
+    for slug, payload in _loaded_skills.items():
+        size = len(payload.get("skill_md_content", "").encode("utf-8"))
+        size += sum(len(s.get("content", "").encode("utf-8"))
+                    for s in payload.get("scripts", []))
+        total += size
+        items.append({"name": slug, "loaded_at": payload.get("loaded_at"),
+                      "bytes": size})
+    return {"loaded": items, "count": len(items), "max": DYNAMIC_CACHE_MAX,
+            "approx_bytes": total,
+            "index_skills": len(get_index()["skills"])}
+
+
 # --------------------------------------------------------------------- scoring
 
 _CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -766,7 +852,33 @@ def main() -> int:
     p.add_argument("--origin", default="")
     p.add_argument("--tier", default="user", choices=sorted(TIER_WEIGHT))
 
+    cache = sub.add_parser("cache", help="v2.0: 动态技能加载缓存管理")
+    csub = cache.add_subparsers(dest="sub", required=True)
+    csub.add_parser("stats", help="查看当前内存中已加载（完整内容）的技能列表")
+    p = csub.add_parser("load", help="按需加载一个技能的完整内容")
+    p.add_argument("slug")
+    p = csub.add_parser("evict", help="手动卸载一个技能（LRU 之外的双保险）")
+    p.add_argument("slug")
+
     a = ap.parse_args()
+
+    if a.cmd == "cache":
+        if a.sub == "stats":
+            _print(cache_stats(), getattr(a, "json", False) or True)
+            return 0
+        if a.sub == "load":
+            payload = load_skill_full(a.slug)
+            if not payload:
+                print(f"未找到技能：{a.slug}", file=sys.stderr)
+                return 1
+            print(json.dumps({"loaded": payload["name"],
+                              "scripts": [s["file"] for s in payload.get("scripts", [])],
+                              "loaded_at": payload["loaded_at"]}, ensure_ascii=False))
+            return 0
+        if a.sub == "evict":
+            ok = unload_skill(a.slug)
+            print(json.dumps({"evicted": a.slug, "ok": ok}, ensure_ascii=False))
+            return 0 if ok else 1
 
     if a.cmd == "scan":
         reg = get_index(force=a.force)  # v1.8: CLI 扫描同样回填内存驻留索引

@@ -89,6 +89,31 @@ def invalidate_route_cache() -> None:
     _route_cache.clear()
 
 
+# ----------------------------------------------------------------- parallel exec
+# v2.0 并行执行引擎：无依赖的子任务并发执行（ThreadPoolExecutor），
+# 总耗时约等于最慢子任务而非之和；有依赖的子任务保持串行（由调用方分层）。
+PARALLEL_MAX_WORKERS = 8
+
+
+def run_parallel(tasks: list) -> list:
+    """并行执行互不依赖的任务。
+
+    `tasks`: [(name, callable)]，callable 无参。返回 [(name, ok: bool, result)]
+    保序返回；任一任务抛异常不阻断其它任务（各自捕获）。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results: dict = {}
+    with ThreadPoolExecutor(max_workers=min(PARALLEL_MAX_WORKERS, max(1, len(tasks)))) as ex:
+        futures = {ex.submit(fn): name for name, fn in tasks}
+        for fut in as_completed(futures):
+            name = futures[fut]
+            try:
+                results[name] = (True, fut.result())
+            except Exception as e:
+                results[name] = (False, str(e))
+    return [(name,) + results[name] for name, _ in tasks]
+
+
 # --------------------------------------------------------------------- helpers
 
 def home() -> Path:
@@ -492,6 +517,16 @@ def cmd_route(a) -> int:
                       candidates=[{"name": c["name"], "tier": c["tier"],
                                    "score": c["score"]} for c in cands])
 
+    # v2.0 动态加载：路由决策只保证候选 top3 的元数据可查（索引驻留，零磁盘
+    # 读取）；完整脚本/依赖留到真正执行技能时按需 load_skill_full。
+    registry.ensure_top_loaded(cands, top=3)
+
+    # v2.0 并行执行信息：intent.parallelizable 自动检测，--parallel 强制启用。
+    # 无依赖子任务 -> 可并行（parallel_groups 给出分层执行计划）；有依赖 -> 串行。
+    force_parallel = bool(getattr(a, "parallel", False))
+    auto_parallel = bool(intent_spec.get("parallelizable"))
+    parallel_enabled = force_parallel or auto_parallel
+
     # --- explain 模式：输出透明报告，不影响正常路由路径 ---
     if getattr(a, "explain", False):
         top_candidates = []
@@ -522,6 +557,12 @@ def cmd_route(a) -> int:
         "intent": intent_spec,
         "multi_intent": _is_multi_intent(intent_spec),
         "sub_task_plan": sub_plan,
+        # v2.0 并行执行：parallelizable=子任务是否互不依赖（自动检测），
+        # parallel_groups=分层执行计划（同层可并行，层间串行），
+        # parallel_enabled=最终是否并行（--parallel 强制或自动检测为真）。
+        "parallelizable": auto_parallel,
+        "parallel_groups": intent_spec.get("parallel_groups", []),
+        "parallel_enabled": parallel_enabled,
         "note": "分数只是词法先验，最终由模型做语义判定；分数接近时优先看 why 与 description",
     })
     return 0
@@ -929,6 +970,32 @@ def cmd_acquire_log(a) -> int:
     return 0
 
 
+# ------------------------------------------------------------ v2.0 workflow
+
+def _workflow_mod():
+    try:
+        import workflow
+        return workflow
+    except ImportError as e:
+        die(f"❌ 工作流引擎不可用：{e}")
+
+
+def cmd_workflow_run(a) -> int:
+    """执行多技能工作流：按模板串行跑 steps，失败自动回滚该步并提示 resume。"""
+    sid = require_sid(a.session)
+    wf = _workflow_mod()
+    try:
+        return wf.cli_run(sid, a.name)
+    except (FileNotFoundError, ValueError) as e:
+        die(f"❌ {e}")
+
+
+def cmd_workflow_resume(a) -> int:
+    """从工作流失败断点续跑（已回滚步骤不会重复执行）。"""
+    sid = require_sid(a.session)
+    return _workflow_mod().cli_resume(sid)
+
+
 # ------------------------------------------------------------------ P1 bridges
 
 def cmd_intent_parse(a) -> int:
@@ -990,6 +1057,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--margin", type=float, default=AUTO_MARGIN)
     p.add_argument("--no-cache", action="store_true",
                    help="跳过路由决策缓存，强制重新打分（调试用）")
+    p.add_argument("--parallel", action="store_true",
+                   help="强制启用并行执行（默认 auto：按 intent.parallelizable 自动检测）")
     p.add_argument("--exclude", action="append", help="skill name to skip (repeatable)")
     p.add_argument("--guard", action="store_true",
                    help="路由前额外跑意图解析 + 能力/资源边界检查（安全边界始终检查）")
@@ -1087,6 +1156,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--path", default="")
     p.add_argument("--note", default="")
     p.set_defaults(fn=cmd_acquire_log)
+
+    wf = sub.add_parser("workflow", help="v2.0: 多技能工作流编排引擎")
+    wsub = wf.add_subparsers(dest="sub", required=True)
+    p = wsub.add_parser("run", help="执行工作流（按模板串行跑 steps）")
+    p.add_argument("name", help="工作流模板名（如 research-publish）")
+    p.set_defaults(fn=cmd_workflow_run)
+    wsub.add_parser("resume", help="从失败断点续跑（自动回滚后恢复）").set_defaults(
+        fn=cmd_workflow_resume)
     return ap
 
 

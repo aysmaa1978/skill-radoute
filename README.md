@@ -36,6 +36,19 @@ git clone https://github.com/aysmaa1978/skill-radoute \
   - 需求雷达 `intent`：关键词 + 正则规则引擎，把自然语言解析成 `intent`／`sub_tasks`／`suggested_skills`，直接喂给 `route` 增强输入（不依赖 LLM，P2 可换 LLM 版）。
   - 边界哨兵 `sentinel`：安全边界（黑名单硬阻断）／能力边界（本地覆盖不足预警）／资源边界（缺 API Key 预警），规则可配 `~/.workbuddy/sentinel_rules.json`。
 
+- **工作流编排（v2.0）**：不止选一个技能，而是把多技能协作定义成可执行的工作流。
+  - 模板驱动：YAML/JSON 声明 `steps`（skill + intent + input/output 上下文槽位），`router.py workflow run <模板名>` 一条命令串行执行，步骤间自动传递上下文。
+  - 失败可恢复：任一步失败自动回滚该步写入（前序结果保留），`router.py workflow resume` 从断点续跑。
+  - 示例模板见 `workflow.example.yaml`（调研并发布 / 写作配图 / 翻译校对）。
+
+- **并行执行（v2.0）**：多意图且子任务互不依赖时并行，总耗时约等于最慢子任务。
+  - `intent.parse` 按依赖图分层：`parallelizable: true` 可并行，`parallel_groups` 给出分层执行计划。
+  - `route --parallel` 强制并行；`router.run_parallel()` 基于 ThreadPoolExecutor 并发执行，异常各自捕获不互相阻断。
+
+- **动态技能加载（v2.0）**：内存只驻留轻量索引，技能完整内容按需加载。
+  - 路由决策只加载候选 top3 元数据（零磁盘读取）；执行时才加载完整 SKILL.md + scripts。
+  - LRU 保留最近 5 个已加载技能，超出自动卸载；`registry.py cache stats / load / evict` 管理。
+
 边界：路由器只做选择、传值、记账，不修改任何既有 skill 的文件。
 
 ## 快速开始
@@ -133,6 +146,15 @@ skill-radoute/
 ```
 
 ## 更新日志
+
+### v2.0.0（多技能编排引擎）
+
+从「路由器」升级为「多技能编排引擎」：不止选一个技能，而是**定义、编排、执行多技能工作流**。以 v1.7（中文化/超时重试/FAQ/quickstart）+ v1.8（增量扫描/路由缓存/内存驻留）为底座。
+
+- **工作流编排（workflow）**：`workflow.py` 支持 YAML/JSON 模板定义多步工作流（skill + intent + 上下文输入输出），`router.py workflow run <模板名>` 一条命令串行执行，步骤间自动传递上下文；任一步失败自动回滚该步写入并提示 `workflow resume`，可从断点续跑（不重复已完成步骤）。
+- **并行执行引擎（parallel）**：`intent.py` 按依赖图给子任务分层（无依赖 `parallelizable: true`，有依赖如 调研→写作 `false`）；`route` 输出自带 `parallel_groups` 分层计划，`route --parallel` 强制并行；`router.run_parallel()` 基于 ThreadPoolExecutor 并发执行，总耗时约等于最慢子任务。
+- **动态技能加载（dynamic loading）**：路由只加载候选 top3 元数据（索引驻留、零磁盘读取）；执行时按需加载完整内容（SKILL.md + scripts），LRU 保留最近 5 个自动卸载；`registry.py cache stats / load / evict` 管理。
+- 向后兼容：`route` / `acquire` / `call` 公开接口不变；纯标准库，零新依赖。
 
 ### v1.4.0
 - **CJK 短查询提权**：归一化分母改用 `query_mass()`（Latin 词=1，CJK 每 2 字=1），修复 n-gram 展开致中文查询比同义英文低约 35% 的根因；8 个真实中文查询打分提升 1.21x–1.45x（如「画架构图」5.68→7.64）。

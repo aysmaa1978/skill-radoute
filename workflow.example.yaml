@@ -1,0 +1,62 @@
+# 工作流模板示例（v2.0 多技能编排引擎）
+
+将 YAML 模板放到 `./workflows/` 或 `~/.workbuddy/workflows/` 目录，
+用 `router.py workflow run <模板名>` 执行（可省略扩展名）。
+
+## 模板一：调研并发布（串行，3 步）
+
+```yaml
+name: "调研并发布"
+steps:
+  - skill: tavily
+    intent: "搜索最新AI进展"
+    output: research.raw
+  - skill: summarize
+    intent: "总结调研内容"
+    input: research.raw
+    output: draft.summary
+  - skill: wechat-publisher
+    intent: "发布公众号文章"
+    input: draft.summary
+    output: draft.url
+```
+
+执行：`router.py workflow run research-publish`
+
+第 2、3 步通过 `input` 自动读取上一步 `output` 写入的上下文槽位，
+无需手动传值；任一步失败自动回滚该步写入并提示 `router.py workflow resume`。
+
+## 模板二：写作 + 配图（可并行，2 步）
+
+```yaml
+name: "写作配图"
+steps:
+  - skill: wechat-publisher
+    intent: "撰写公众号正文"
+    output: draft.md
+  - skill: drawio-skill
+    intent: "绘制架构图"
+    output: draft.diagram
+```
+
+执行：`router.py workflow run write-visualize`
+
+两步互不依赖（intent 判定为 parallelizable），可用
+`router.py route "写文章并画架构图" --parallel` 触发并行执行。
+
+## 模板三：翻译 + 校对（串行，2 步）
+
+```yaml
+name: "翻译校对"
+steps:
+  - skill: translate
+    intent: "把文档翻译成英文"
+    input: source.md
+    output: translated.md
+  - skill: summarize
+    intent: "校对译文质量"
+    input: translated.md
+    output: review.notes
+```
+
+执行：`router.py workflow run translate-review`

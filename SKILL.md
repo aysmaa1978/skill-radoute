@@ -151,8 +151,64 @@ S="<本技能目录>/scripts"
 | `router.py acquire-log --skill N --origin U --audit P2` | 记录远程技能获取 |
 | `acquire.py run --query Q [--slug S] [--auto] [--force]` | 检索→审计→确认→安装→注册 全自动链路 |
 | `acquire.py resume` / `acquire.py reset` | 中断后续跑 / 放弃当前会话 |
+| `router.py workflow run <模板名>` / `workflow resume` | v2.0 多技能工作流编排：串行跑 steps，失败自动回滚并可从断点续跑 |
+| `router.py route "<任务>" --parallel` | v2.0 强制并行执行互不依赖的子任务（默认 auto 检测） |
+| `registry.py cache stats / load / evict` | v2.0 动态技能加载：查看/加载/卸载内存中的技能 |
 
 全局 `--session <id>` 可指定非活跃会话，放在子命令之前。
+
+---
+
+## 多技能工作流编排（v2.0）
+
+当任务需要「多个技能按固定顺序串联」时，不再手动一步步 route/call，而是定义一次模板、一条命令跑完：
+
+1. 在 `./workflows/`（或 `~/.workbuddy/workflows/`）写模板 `research-publish.yaml`：
+
+```yaml
+name: "调研并发布"
+steps:
+  - skill: tavily
+    intent: "搜索最新AI进展"
+    output: research.raw
+  - skill: summarize
+    intent: "总结调研内容"
+    input: research.raw
+    output: draft.summary
+  - skill: wechat-publisher
+    intent: "发布公众号文章"
+    input: draft.summary
+    output: draft.url
+```
+
+2. 执行：
+
+```bash
+"$PY" "$S/router.py" workflow run research-publish
+```
+
+- 步骤间**自动传递上下文**：上一步 `output` 写入 context bus，下一步 `input` 自动读取，无需手动传值。
+- 任一步失败：自动**回滚该步写入**（前序步骤结果保留），并提示恢复指令。
+- 恢复：`"$PY" "$S/router.py" workflow resume` 从失败断点续跑，不会重复已完成的步骤。
+- 模板格式：YAML 子集或 JSON，纯标准库解析，无需 PyYAML。
+
+## 并行执行（v2.0）
+
+`intent.parse` 会按依赖图给子任务分层：互不依赖的子任务标记 `parallelizable: true`，有依赖（如 调研→写作）标记 `parallel: false`。
+
+- **auto（默认）**：`route` 输出自带 `parallelizable` / `parallel_groups`（分层执行计划），无依赖时建议并行。
+- **强制**：`router.py route "写文章并画架构图" --parallel` 强制并行。
+- **执行器**：`router.run_parallel([(name, fn), ...])` 用 ThreadPoolExecutor 并发跑互不依赖的任务，总耗时约等于最慢子任务；异常各自捕获不互相阻断。
+
+## 动态技能加载（v2.0）
+
+路由决策只保证候选 top3 的元数据可查（索引驻留、零磁盘读取）；真正执行某个技能时才加载其完整内容（SKILL.md 全文 + scripts 依赖），并进入 LRU 缓存（保留最近 5 个，超出自动卸载最久未用项）。
+
+```bash
+"$PY" "$S/registry.py" cache stats     # 当前内存中已加载的技能
+"$PY" "$S/registry.py" cache load tavily
+"$PY" "$S/registry.py" cache evict tavily
+```
 
 ---
 
