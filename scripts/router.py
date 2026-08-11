@@ -79,9 +79,9 @@ def current_sid() -> str | None:
 def require_sid(explicit: str | None = None) -> str:
     sid = explicit or current_sid()
     if not sid:
-        die("no active session. run: router.py session new --goal \"...\"")
+        die("❌ 没有活跃会话。请先运行：router.py session new --goal \"...\" 创建新会话。")
     if not (sessions_dir() / sid / "session.json").is_file():
-        die(f"unknown session: {sid}")
+        die(f"❌ 未知会话：{sid}。请先运行 router.py session new 创建会话。")
     return sid
 
 
@@ -158,7 +158,7 @@ def kv_pairs(items: list | None) -> dict:
         if not it:
             continue
         if "=" not in it:
-            die(f"expected key=value, got: {it}")
+            die(f"❌ 参数格式错误：应为 key=value，实际为：{it}")
         k, v = it.split("=", 1)
         try:
             out[k.strip()] = json.loads(v)
@@ -486,7 +486,7 @@ def cmd_call_open(a) -> int:
     sid = require_sid(a.session)
     s = load_session(sid)
     if s.get("status") != "active":
-        die(f"session {sid} is {s.get('status')}; start a new one")
+        die(f"❌ 会话 {sid} 当前状态为 {s.get('status')}，不可开新调用。请先结束或新建会话。")
     s["call_seq"] = int(s.get("call_seq", 0)) + 1
     cid = f"c{s['call_seq']:03d}"
     rp = (a.parent or "").strip().lower()
@@ -523,7 +523,7 @@ def cmd_call_close(a) -> int:
     calls = _calls(sid)
     cid = a.id or _top_open(calls)
     if not cid or cid not in calls:
-        die("no open call to close (pass --id)")
+        die("❌ 没有可关闭的未闭合调用。请通过 --id 指定要关闭的调用。")
     outs = kv_pairs(a.output)
     trace_append(sid, "call_close", call_id=cid, status=a.status,
                  outputs=outs, artifacts=a.artifact or [],
@@ -570,7 +570,7 @@ def cmd_call_resume(a) -> int:
     sid = require_sid(a.session)
     calls = _calls(sid)
     if a.id not in calls:
-        die(f"unknown call: {a.id}")
+        die(f"❌ 未知调用：{a.id}。请先运行 router.py call list 查看可用调用。")
     trace_append(sid, "call_resume", call_id=a.id, skill=calls[a.id]["skill"])
     s = load_session(sid)
     s["stack"] = [x for x in s.get("stack", []) if x != a.id] + [a.id]
@@ -587,7 +587,7 @@ def cmd_switch(a) -> int:
     s = load_session(sid)
     frm = s.get("current_skill")
     if frm is None:
-        print(json.dumps({"warning": "no active call in scope; switch 'from' is empty (handoff source lost). Keep the source call open or use --keep-open before switching."}, ensure_ascii=False), file=sys.stderr)
+        print(json.dumps({"warning": "当前范围内没有活跃调用，switch 的 from 为空（交接源丢失）。请保持源调用打开，或先使用 --keep-open 再切换。"}, ensure_ascii=False), file=sys.stderr)
     calls = _calls(sid)
     suspended = None
     if a.keep_open:
@@ -648,7 +648,7 @@ def cmd_ctx_set(a) -> int:
     try:
         value = json.loads(a.value) if a.json else a.value
     except json.JSONDecodeError:
-        die("--json given but value is not valid JSON")
+        die("❌ --json 模式下 value 不是合法 JSON。请检查 JSON 格式后重试。")
     calls = _calls(sid)
     cid = _top_open(calls)
     written_by = a.by or (calls[cid]["skill"] if cid else None)
@@ -667,7 +667,7 @@ def cmd_ctx_get(a) -> int:
     slots = load_ctx(sid).get("slots", {})
     if a.key:
         if a.key not in slots:
-            die(f"context key not found: {a.key}")
+            die(f"❌ 上下文键不存在：{a.key}。请先通过 ctx set 写入该键。")
         cur = slots[a.key]
         if not a.meta:
             trace_append(sid, "ctx_read", key=a.key, rev=cur.get("rev"))
@@ -692,7 +692,7 @@ def cmd_ctx_history(a) -> int:
     sid = require_sid(a.session)
     slots = load_ctx(sid).get("slots", {})
     if a.key not in slots:
-        die(f"context key not found: {a.key}")
+        die(f"❌ 上下文键不存在：{a.key}。请先通过 ctx set 写入该键。")
     slot = slots[a.key]
     hist = slot.get("history") or [{
         "value": slot.get("value"), "written_by": slot.get("written_by"),
@@ -709,14 +709,14 @@ def cmd_ctx_rollback(a) -> int:
     ctx = load_ctx(sid)
     slots = ctx.setdefault("slots", {})
     if a.key not in slots:
-        die(f"context key not found: {a.key}")
+        die(f"❌ 上下文键不存在：{a.key}。请先通过 ctx set 写入该键。")
     slot = slots[a.key]
     target = next((h for h in (slot.get("history") or [])
                    if h.get("rev") == a.rev), None)
     if target is None and slot.get("rev") == a.rev:
         target = slot
     if target is None:
-        die(f"rev {a.rev} not found for key '{a.key}'; run: ctx history {a.key}")
+        die(f"❌ 键 '{a.key}' 下找不到版本 rev {a.rev}。请运行 ctx history {a.key} 查看可用版本。")
     prev_rev = slot.get("rev")
     slots[a.key] = _push_version(slot, target.get("value"),
                                  target.get("written_by"), target.get("call_id"),
@@ -833,7 +833,7 @@ def cmd_replay(a) -> int:
     sid = require_sid(a.session)
     calls = _calls(sid)
     if a.id not in calls:
-        die(f"unknown call: {a.id}")
+        die(f"❌ 未知调用：{a.id}。请先运行 router.py call list 查看可用调用。")
     c = calls[a.id]
     ctx = load_ctx(sid).get("slots", {})
     emit({

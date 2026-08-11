@@ -169,3 +169,50 @@ skill-radoute/
 ## License
 
 MIT — 见 [LICENSE](LICENSE)。
+
+## ❓ 常见问题（FAQ）
+
+### Q1：远程获取技能时卡住不动怎么办？
+
+v1.7 起每次下载请求都有 **30 秒超时**，且失败后会自动重试 3 次（指数退避等待 1s / 2s / 4s），不会永久卡死。如果长时间停在「正在下载技能包...」，说明网络连不上下载源：
+
+1. 按 `Ctrl+C` 中断（中断后状态已落盘）。
+2. 检查网络连接，或参考 Q3 配置代理。
+3. 重新执行 `python acquire.py resume` 从断点继续，无需从头开始。
+
+### Q2：acquire resume 报错怎么办？
+
+先看报错类型：
+
+- **「⚠️ 没有可恢复的会话」**：说明上次会话已完成或已被 reset，直接重新执行 `python acquire.py run --query <技能名> --version <版本>` 即可。
+- **「❌ 已中止：...」**：会话状态在 `~/.workbuddy/acquire_state.json`（`SKILL_ROUTER_ACQUIRE_STATE` 可改路径），可先 `python acquire.py status` 查看当前进度。
+- 状态文件损坏或想重新开始：执行 `python acquire.py reset` 清空会话，再重新 `run`。
+
+### Q3：国内用户无法访问 GitHub 怎么办？
+
+设置代理环境变量后重试即可，按优先级读取 `GITHUB_PROXY` → `HTTPS_PROXY` → `HTTP_PROXY`：
+
+```bash
+# Windows (cmd)
+set GITHUB_PROXY=http://127.0.0.1:7890
+# Windows (PowerShell) / macOS / Linux
+$env:GITHUB_PROXY="http://127.0.0.1:7890"
+export GITHUB_PROXY=http://127.0.0.1:7890
+```
+
+设置后重新执行 `python acquire.py resume`（或 `run`）。如仍失败，检查代理地址与端口是否可达。
+
+### Q4：如何确认当前版本？
+
+- **git 克隆安装**：在技能目录执行 `git describe --tags`（如输出 `v1.7.0`）。
+- **发布包安装**：安装包文件名自带版本号，如 `skill-radoute-v1.7.0.skill.zip`。
+- **运行日志**：下载请求的 User-Agent 为 `skill-radoute/1.7`，`acquire_trace.jsonl` 中的事件也含版本信息。
+- **文档**：本 README「更新日志」按版本倒序记录，最新版本在最上方。
+
+### Q5：路由结果不符合预期怎么办？
+
+1. 先用 `python scripts/router.py route "任务描述" --explain` 查看 `score_breakdown` 与 `decision_reason`，确认是哪一项拉高了/拉低了分数。
+2. 用 `python scripts/registry.py search "任务描述" --top 5` 探查候选排序是否合理。
+3. top1 明显不适合时，用 `--exclude <技能名>` 否决后重新路由，否决动作会留在 trace 里。
+4. 判定为多意图返回 `decompose` 时，按 `sub_task_plan` 拆成多个子任务逐个路由，不要硬套单技能。
+5. 需要调整阈值或同义表时，参见 `references/routing-rules.md`。分数只是词法先验，最终选谁由模型结合 description 判断。

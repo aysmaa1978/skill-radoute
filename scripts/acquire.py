@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import sys
+import time
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
@@ -94,7 +95,7 @@ def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
     for name in zf.namelist():
         target = (dest / name).resolve()
         if not str(target).startswith(str(dest) + os.sep) and target != dest:
-            raise ValueError(f"zip slip blocked: {name}")
+            raise ValueError(f"❌ 解压路径越界（zip slip）已被阻止：{name}。请勿安装来源不明的技能包。")
     zf.extractall(dest)
 
 
@@ -135,7 +136,7 @@ def _download(sel: dict) -> Path:
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True, exist_ok=True)
     zip_path = work / f"{sel['slug']}.zip"
-    req = urllib.request.Request(url, headers={"User-Agent": "skill-radoute/1.6"})
+    req = urllib.request.Request(url, headers={"User-Agent": "skill-radoute/1.7"})
     # 国内网络适配：优先读 GITHUB_PROXY，其次标准 HTTPS_PROXY/HTTP_PROXY。
     # urllib 默认不识别自定义变量 GITHUB_PROXY，这里显式装配 ProxyHandler。
     proxy = (os.environ.get("GITHUB_PROXY")
@@ -145,15 +146,37 @@ def _download(sel: dict) -> Path:
         urllib.request.ProxyHandler({"https": proxy, "http": proxy}))
         if proxy else None)
     opener_open = opener.open if opener else urllib.request.urlopen
-    try:
-        with opener_open(req, timeout=90) as r, open(zip_path, "wb") as f:
-            shutil.copyfileobj(r, f)
-    except Exception as e:  # 网络超时/不可达：给出可操作的友好提示
-        os.remove(zip_path) if zip_path.exists() else None
+    # v1.7：单次请求 30 秒超时（避免网络慢时永久卡死）；下载失败自动重试
+    # 最多 3 次，指数退避等待 1s / 2s / 4s；下载中每 512KB 打印一次进度。
+    last_err: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            print(f"正在下载技能包：{sel['slug']} ...", file=sys.stderr)
+            with opener_open(req, timeout=30) as r, open(zip_path, "wb") as f:
+                total = 0
+                while True:
+                    chunk = r.read(512 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    total += len(chunk)
+                    print(f"  已下载 {total / (1024 * 1024):.2f} MB", file=sys.stderr)
+            break
+        except Exception as e:  # 网络超时/不可达：清理后按退避策略重试
+            zip_path.unlink(missing_ok=True)
+            last_err = e
+            if attempt < 3:
+                wait = 2 ** (attempt - 1)  # 指数退避：1s、2s、4s
+                print(f"⚠️ 第 {attempt} 次下载失败（{e}），{wait}s 后自动重试...",
+                      file=sys.stderr)
+                time.sleep(wait)
+    else:
         hint = ""
-        if isinstance(e, (TimeoutError,)) or "timed out" in str(e).lower():
+        if isinstance(last_err, (TimeoutError,)) or "timed out" in str(last_err).lower():
             hint = "（网络超时）请检查连接，或设置 GITHUB_PROXY=http://代理地址 后重试。"
-        raise RuntimeError(f"下载失败：{e}{hint}")
+        raise RuntimeError(
+            f"❌ 下载失败：已重试 3 次仍无法连接（{last_err}）。{hint}"
+            f"请检查网络，然后执行 python acquire.py resume 继续。")
     # --- 云鼎修复②: SHA256 校验（硬编码预期值，绝不从远程获取）---
     # 未预置 / 不匹配 -> 删除文件并抛错，绝不进入安装流程。
     _verify_hash(zip_path, sel["slug"])
@@ -161,10 +184,10 @@ def _download(sel: dict) -> Path:
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             if not any("SKILL.md" in name for name in zf.namelist()):
-                raise ValueError("SKILL.md not found in zip")
+                raise ValueError("❌ 技能包中未找到 SKILL.md，可能不是有效的技能包")
     except Exception as e:
         os.remove(zip_path)
-        raise RuntimeError(f"Integrity check failed: {e}")
+        raise RuntimeError(f"❌ 技能包完整性校验失败：{e}。已删除下载文件，请从可信来源重新获取。")
     ext = work / "extracted"
     with zipfile.ZipFile(zip_path) as z:
         _safe_extract(z, ext)
@@ -320,15 +343,15 @@ def _pipeline(state: dict, args, start: str) -> int:
             except RuntimeError as e:
                 return _fail(state, str(e))
             if r is None:
-                return _fail(state, "audit: no candidate or download failed")
+                return _fail(state, "❌ 审计阶段失败：没有候选技能或下载失败")
             sel, report, dl = r
         elif step == "confirm":
             if not _run_confirm(state, args, sel, report):
-                return _fail(state, "confirm rejected")
+                return _fail(state, "❌ 安装确认被拒绝")
         elif step == "install":
             dest = _run_install(state, args, sel, dl)
             if dest is None:
-                return _fail(state, "install failed (exists? use --force)")
+                return _fail(state, "❌ 安装失败：目标目录已存在。如需覆盖请加 --force 参数。")
         elif step == "register":
             _run_register(state, args, sel)
     try:
@@ -338,14 +361,14 @@ def _pipeline(state: dict, args, start: str) -> int:
         pass
     name = sel.get("slug") or sel.get("name")
     trace("acquire_done", session=state["session_id"], name=name)
-    print(f"done. '{name}' installed at {SKILLS_DIR / name}")
+    print(f"✅ 完成：'{name}' 已安装到 {SKILLS_DIR / name}")
     return 0
 
 
 def _fail(state: dict, msg: str) -> int:
     trace("acquire_failed", reason=msg)
-    print(f"aborted: {msg}", file=sys.stderr)
-    print("resume with: python acquire.py resume", file=sys.stderr)
+    print(f"❌ 已中止：{msg}", file=sys.stderr)
+    print("继续安装请运行：python acquire.py resume", file=sys.stderr)
     return 1
 
 
@@ -379,13 +402,13 @@ def main() -> int:
         if st.is_complete(cur) or cur.get("session_id") is None or a.force_new:
             state = st.new_session(a.query, a.source, a.auto)
         else:
-            print("session in progress; use `resume` or `--force-new`", file=sys.stderr)
+            print("⚠️ 已有进行中的会话。请运行 `resume` 继续，或加 `--force-new` 重新开始。", file=sys.stderr)
             return 2
         return _pipeline(state, a, "find")
     elif a.cmd == "resume":
         state = st.load()
         if st.is_complete(state) or state.get("session_id") is None:
-            print("nothing to resume")
+            print("⚠️ 没有可恢复的会话（可能已完成或已重置）")
             return 0
         return _pipeline(state, a, st.resume_step(state) or "find")
     elif a.cmd == "status":
