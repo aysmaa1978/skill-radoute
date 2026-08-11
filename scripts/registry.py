@@ -2,23 +2,26 @@
 """Skill registry: discover, index and search skills across all local sources.
 
 Subcommands:
-  scan    [--refresh] [--json]        Build/refresh the registry index.
+  scan    [--force] [--json]        Build/refresh the registry index.
   search  "<query>" [--top N] [--json] [--source S]
   show    <name>                      Print full record for one skill.
   sources                             List detected roots and skill counts.
   add     --path P --source remote --origin URL   Register a freshly installed skill.
 
 Registry file: $SKILL_ROUTER_HOME/registry.json (default <cwd>/.workbuddy/router).
+Scan cache:    $SKILL_ROUTER_REGISTRY_CACHE (default ~/.workbuddy/registry_cache.json).
 Override builtin root with env SKILL_ROUTER_BUILTIN_DIR.
 """
 from __future__ import annotations
 
 import argparse
 import functools
+import hashlib
 import json
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -200,17 +203,131 @@ def read_skill(skill_md: Path, tier: str) -> dict | None:
     }
 
 
-def scan(extra: list[dict] | None = None) -> dict:
+def _scan_cache_path() -> Path:
+    """扫描缓存文件：$SKILL_ROUTER_REGISTRY_CACHE，默认 ~/.workbuddy/registry_cache.json。"""
+    env = os.environ.get("SKILL_ROUTER_REGISTRY_CACHE")
+    if env:
+        return Path(env)
+    return Path.home() / ".workbuddy" / "registry_cache.json"
+
+
+def _load_scan_cache() -> dict:
+    p = _scan_cache_path()
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data.get("skills", {}) or {}
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _save_scan_cache(cache: dict) -> None:
+    p = _scan_cache_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"skills": cache}, ensure_ascii=False),
+                     encoding="utf-8")
+    except OSError:
+        pass  # 缓存写失败不致命：下次扫描重新全量构建即可
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for blk in iter(lambda: f.read(65536), b""):
+                h.update(blk)
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+
+_FP_CACHE: str = ""
+_FP_CACHE_TS: float = 0.0
+FP_TTL = 1.0  # 指纹缓存 TTL（秒）：连续路由复用缓存指纹，O(1) 构建缓存 key
+
+
+def skills_fingerprint() -> str:
+    """v1.8: 已安装技能集版本指纹（path + mtime + size 的 stat 级哈希）。
+
+    任何技能安装/卸载/内容修改都会改变指纹，用作 router 路由决策缓存的
+    失效信号。纯 stat、不读文件内容。结果带 1s TTL 缓存：连续路由（间隔
+    <1s）零成本复用；修改 SKILL.md 后超过 1s 的首次路由必然重算并发现变更。
+    """
+    global _FP_CACHE, _FP_CACHE_TS
+    now = time.time()
+    if _FP_CACHE and (now - _FP_CACHE_TS) < FP_TTL:
+        return _FP_CACHE
+    h = hashlib.sha256()
+    for _tier, root in discover_roots():
+        for skill_md in sorted(root.glob("*/SKILL.md")):
+            try:
+                st = skill_md.stat()
+                sig = f"{skill_md}|{int(st.st_mtime)}|{st.st_size}"
+            except OSError:
+                sig = f"{skill_md}|gone"
+            h.update(sig.encode("utf-8"))
+    _FP_CACHE, _FP_CACHE_TS = h.hexdigest()[:16], now
+    return _FP_CACHE
+
+
+def _read_skill_cached(skill_md: Path, tier: str, cache: dict) -> dict | None:
+    """v1.8 增量读：SKILL.md 的 mtime 未变 -> 直接复用缓存记录（不重读文件）。
+
+    缓存条目：{"mtime": int, "sha256": str, "record": {...}}。mtime 是快速变更
+    信号；sha256 摘要一并入库，供核对/调试（不参与每次变更判定，避免全量重读）。
+    返回的记录是缓存记录的浅拷贝，且剥离 shadows（去重阶段现算），
+    防止调用方 mutate 污染缓存。
+    """
+    key = str(skill_md)
+    try:
+        st = skill_md.stat()
+    except OSError:
+        return None
+    mtime = int(st.st_mtime)
+    ent = cache.get(key)
+    if ent and ent.get("mtime") == mtime and isinstance(ent.get("record"), dict):
+        rec = dict(ent["record"])
+        rec.pop("shadows", None)
+        return rec
+    rec = read_skill(skill_md, tier)
+    if not rec:
+        return None
+    cache[key] = {"mtime": mtime, "sha256": _sha256_file(skill_md),
+                  "record": {k: v for k, v in rec.items()}}
+    return rec
+
+
+def scan(extra: list[dict] | None = None, force: bool = False) -> dict:
+    """Build the registry index.
+
+    v1.8: incremental. SKILL.md files whose mtime is unchanged are reused
+    from the scan cache (~/.workbuddy/registry_cache.json) instead of being
+    re-read, so an unchanged registry rescan is stat()-only. `force=True`
+    bypasses the cache and rebuilds everything from disk (registry.py scan --force).
+    """
+    cache = {} if force else _load_scan_cache()
+    cache = dict(cache)
     records: list[dict] = []
     by_root: list[dict] = []
+    seen: set[str] = set()
     for tier, root in discover_roots():
         n = 0
         for skill_md in sorted(root.glob("*/SKILL.md")):
-            rec = read_skill(skill_md, tier)
+            key = str(skill_md)
+            seen.add(key)
+            rec = _read_skill_cached(skill_md, tier, cache)
             if rec:
                 records.append(rec)
                 n += 1
         by_root.append({"tier": tier, "root": str(root), "count": n})
+    # 缓存清理：已不存在（被删除/移动）的技能条目剔除
+    for key in [k for k in cache if k not in seen]:
+        cache.pop(key, None)
+    _save_scan_cache(cache)
     # de-dup by (name) keeping the highest tier weight
     best: dict[str, dict] = {}
     for r in records:
@@ -236,9 +353,17 @@ def registry_path() -> Path:
     return router_home() / "registry.json"
 
 
-def load_registry(auto_scan: bool = True, max_age: int = 900) -> dict:
+def load_registry(auto_scan: bool = True, max_age: int = 900,
+                  force: bool = False) -> dict:
+    """v1.8: 内存驻留优先。内存索引新鲜则直接返回（无磁盘内容读取）；
+    否则回退 registry.json 缓存 / 增量扫描，并回填内存索引。force=True 强制全量重建。"""
+    if not force:
+        try:
+            return get_index()
+        except Exception:
+            pass
     p = registry_path()
-    if p.is_file():
+    if p.is_file() and not force:
         try:
             reg = json.loads(p.read_text(encoding="utf-8"))
             fresh = (time.time() - reg.get("generated_at", 0)) < max_age
@@ -246,7 +371,7 @@ def load_registry(auto_scan: bool = True, max_age: int = 900) -> dict:
                 return reg
         except (OSError, json.JSONDecodeError):
             pass
-    reg = scan(extra=_remote_entries())
+    reg = scan(extra=_remote_entries(), force=force)
     save_registry(reg)
     return reg
 
@@ -266,6 +391,67 @@ def save_registry(reg: dict) -> None:
     p = registry_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(reg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# --------------------------------------------------------- memory residency
+# v1.8 内存驻留：首次加载后索引常驻内存，无变更时路由/搜索零磁盘内容读取。
+# 后台 watcher 线程每 30s 轮询 skills_fingerprint()（stat 级，不读文件内容），
+# 检测到技能集变更时自动增量刷新内存索引，无需等待下次路由触发。
+WATCH_INTERVAL = 30.0
+_MEM_INDEX: dict | None = None   # 内存驻留的索引
+_MEM_TS: float = 0.0             # 上次刷新时间戳
+_MEM_FP: str = ""                # 上次指纹
+_watcher_started = False
+
+
+def _start_watcher() -> None:
+    global _watcher_started
+    if _watcher_started:
+        return
+    _watcher_started = True
+
+    def _loop() -> None:
+        while True:
+            time.sleep(WATCH_INTERVAL)
+            try:
+                refresh_index()
+            except Exception:
+                pass
+
+    threading.Thread(target=_loop, daemon=True, name="registry-watcher").start()
+
+
+def refresh_index(force: bool = False) -> dict:
+    """内存索引刷新。
+
+    - 每次调用做 stat 级指纹比对（skills_fingerprint 带 1s TTL：连续路由
+      零成本，间隔 >1s 才重算）；未变更直接复用内存索引（零磁盘内容读取），
+      变更立即增量扫描 —— 保证「改完 SKILL.md / 装完新技能后，下次路由
+      立刻用新内容」，无需等 30s 轮询窗口。
+    - 冷启动 / force=True：全量扫描并回填内存与 registry.json。
+    - 后台 watcher 线程每 30s 主动调用一次，变更无需路由触发也能自动刷新。
+    """
+    global _MEM_INDEX, _MEM_TS, _MEM_FP
+    now = time.time()
+    if _MEM_INDEX is not None and not force:
+        fp = skills_fingerprint()                 # 1s TTL 缓存，O(1)
+        if fp == _MEM_FP:
+            _MEM_TS = now
+            return _MEM_INDEX
+        reg = scan(extra=_remote_entries())
+        save_registry(reg)
+    else:
+        reg = scan(extra=_remote_entries(), force=force)
+        save_registry(reg)
+    _MEM_INDEX, _MEM_TS, _MEM_FP = reg, now, skills_fingerprint()
+    return _MEM_INDEX
+
+
+def get_index(force: bool = False) -> dict:
+    """v1.8 内存驻留索引入口：无变更时路由直接从内存读取，无 read() 系统调用。
+    首次调用自动启动 30s 轮询 watcher。force=True 强制全量重建。"""
+    _start_watcher()
+    return refresh_index(force=force)
 
 
 # --------------------------------------------------------------------- scoring
@@ -561,6 +747,8 @@ def main() -> int:
 
     p = sub.add_parser("scan", help="build/refresh index")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--force", action="store_true",
+                   help="强制全量扫描，忽略增量缓存（调试用）")
 
     p = sub.add_parser("search", help="rank skills against a task description")
     p.add_argument("query")
@@ -581,7 +769,7 @@ def main() -> int:
     a = ap.parse_args()
 
     if a.cmd == "scan":
-        reg = scan(extra=_remote_entries())
+        reg = get_index(force=a.force)  # v1.8: CLI 扫描同样回填内存驻留索引
         save_registry(reg)
         summary = {"skills": len(reg["skills"]), "roots": reg["roots"],
                    "registry": str(registry_path())}

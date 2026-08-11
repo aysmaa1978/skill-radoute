@@ -312,6 +312,12 @@ def _run_register(state: dict, args, sel: dict) -> bool:
     try:
         import registry
         registry.scan()
+        # v1.8: 技能集已变更，清空路由决策缓存（指纹 key 也会自动失效，这里双保险）
+        try:
+            import router
+            router.invalidate_route_cache()
+        except Exception:
+            pass
         ok = True
     except Exception as e:  # registry unavailable / scan error -> not fatal
         trace("acquire_register", warning=str(e)[:200])
