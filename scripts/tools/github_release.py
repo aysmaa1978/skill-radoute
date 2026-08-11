@@ -4,7 +4,8 @@ import os
 import urllib.request
 import sys
 
-ZIP = r'C:/Users/86155/.workbuddy/skills/skill-radoute/skill-radoute-v1.5.0.skill.zip'
+TAG = 'v1.6.0'
+ZIP = r'C:/Users/86155/.workbuddy/skills/skill-radoute/skill-radoute-v1.6.0.skill.zip'
 
 if not os.path.exists(ZIP):
     print('❌ ZIP 文件不存在')
@@ -28,9 +29,19 @@ if not token:
 print('✅ Token 获取成功')
 url = 'https://api.github.com/repos/aysmaa1978/skill-radoute/releases'
 data = json.dumps({
-    'tag_name': 'v1.5.0',
-    'name': 'v1.5.0 — 云鼎安全修复 + 弱匹配守卫',
-    'body': '## 云鼎安全修复\n1. 可信下载源\n2. SHA256 校验\n3. 版本锁定+人工确认\n\n## 路由增强\n- 弱匹配守卫\n- route --explain\n- 语义同义词提升',
+    'tag_name': TAG,
+    'name': 'v1.6.0 — Bug 修复 + 非交互防护 + 失败退出码',
+    'body': (
+        '## v1.6.0 Bug 修复\n'
+        '1. **resume 崩溃**：acquire.py resume 参数回退到会话 context，消除 AttributeError 崩溃\n'
+        '2. **P0 自动放行**：删除 P0 + --auto + 预置哈希自动放行分支，P0 恒需人工确认\n'
+        '3. **current_skill 清空**：call close 栈空时保留 current_skill，switch --keep-open 后不再丢失\n'
+        '4. **EOFError 防护**：非交互环境 input() 视为拒绝，不再崩溃\n'
+        '5. **失败退出码**：acquire 失败链路返回非零退出码\n\n'
+        '## 其他\n'
+        '- --exclude 大小写不敏感 / 删除 finder 死常量 / registry stat OSError / sentinel kws 判定\n'
+        '- 测试：4 套全绿（acquire 16 passed，call_chain 17 项）'
+    ),
     'draft': False,
     'prerelease': False
 })
@@ -41,7 +52,7 @@ req = urllib.request.Request(url, data=data.encode('utf-8'), headers={
 })
 resp = urllib.request.urlopen(req)
 release = json.loads(resp.read().decode())
-upload_url = release['upload_url'].replace('{?name,label}', '?name=skill-radoute-v1.5.0.skill.zip')
+upload_url = release['upload_url'].replace('{?name,label}', f'?name=skill-radoute-{TAG}.skill.zip')
 with open(ZIP, 'rb') as f:
     zip_data = f.read()
 req = urllib.request.Request(upload_url, data=zip_data, headers={
@@ -50,4 +61,4 @@ req = urllib.request.Request(upload_url, data=zip_data, headers={
     'Content-Type': 'application/octet-stream'
 })
 urllib.request.urlopen(req)
-print('✅ Release v1.5.0 创建完成，附件已上传')
+print(f'✅ Release {TAG} 创建完成，附件已上传')
