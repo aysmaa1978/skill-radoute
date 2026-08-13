@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import router  # noqa: E402   # 复用 context bus / trace / call 生命周期
+import intent  # noqa: E402   # v3.0: 自然语言 -> 工作流模板（parse_workflow）
 
 STATE_FILE = Path(os.environ.get(
     "SKILL_ROUTER_WORKFLOW_STATE",
@@ -94,6 +96,72 @@ def parse_template(text: str) -> dict:
     return root
 
 
+# ------------------------------------------------------------ v3.0 NLP -> template
+
+def parse_workflow(text: str, name: str = "") -> dict:
+    """把自然语言任务描述解析成工作流模板（与 parse_template 输出同构）。
+
+    基于 intent.parse 的子任务拆分：每个子任务映射为一个 step：
+      - skill   取该类型建议技能的第一项（intent.TYPE_SKILLS）
+      - intent  取子任务的模板 target
+      - output  用 <type>.result 命名，供后续步骤 input 引用
+      - input   当前类型依赖前一类型时自动串接上一步 output
+
+    v3.0 (M4): 技能选择会结合本地反馈学习数据——被否决的技能跳过、
+    被选中的技能优先（learning.get_feedback 相似度匹配）。
+
+    返回 {"name": ..., "steps": [...]}，可直接 `router.py workflow run`
+    （等价模板），也可 `--save` 落盘为 YAML。
+    抛 ValueError 当任务描述解析不出任何动作。
+    """
+    spec = intent.parse(text)
+    steps: list[dict] = []
+    prev_type: str | None = None
+    prev_out: str | None = None
+    for st in spec["sub_tasks"]:
+        t = st["type"]
+        skills = intent.TYPE_SKILLS.get(t, [])
+        step = {"skill": _pick_skill(t, text, skills),
+                "intent": st.get("target", t)}
+        if prev_out and prev_type in intent.DEPENDS_ON.get(t, ()):
+            step["input"] = prev_out       # 依赖链自动串接上下文
+        out = f"{t}.result"
+        step["output"] = out
+        steps.append(step)
+        prev_type, prev_out = t, out
+    if not steps:
+        raise ValueError(f"❌ 无法从任务描述解析出任何动作：{text}\n"
+                         f"   原因：没有命中 20 类动作词表中的任一关键词\n"
+                         f"   解决：换一种说法，如「搜索...」「写...」「画...」；"
+                         f"或先用 router.py intent parse \"{text}\" 查看解析结果")
+    return {"name": name or f"{spec['intent']}_workflow", "steps": steps}
+
+
+def _pick_skill(task_type: str, text: str, skills: list) -> str:
+    """v3.0 (M4): 结合本地反馈学习选择技能——被否决的跳过、被选中的优先。
+
+    反馈不存在/不可用时回退到建议技能列表第一项（向后兼容）。
+    """
+    if not skills:
+        return task_type
+    try:
+        import learning
+        fbs = learning.get_feedback(text)
+    except Exception:
+        fbs = []
+    if fbs:
+        chosen = {str(fb.get("chosen", "")).lower() for fb in fbs}
+        excluded = {str(x).lower() for fb in fbs
+                    for x in (fb.get("excluded") or [])}
+        for s in skills:
+            if s.lower() in chosen:
+                return s                       # 反馈选中的技能优先
+        for s in skills:
+            if s.lower() not in excluded:
+                return s                       # 跳过被否决的技能
+    return skills[0]
+
+
 def find_template(name: str) -> Path | None:
     """按名称查找模板：<cwd>/workflows、<cwd>、~/.workbuddy/workflows、
     技能根目录 workflows/。支持 .yaml/.yml/.json 扩展（可省略）。"""
@@ -114,9 +182,14 @@ def find_template(name: str) -> Path | None:
 def load_template(name: str) -> dict:
     p = find_template(name)
     if not p:
+        # v3.0: 报错带「原因 + 解决建议」，不再只给一句找不到
         raise FileNotFoundError(
-            f"未找到工作流模板：{name}（查找：./workflows、./、"
-            f"~/.workbuddy/workflows、技能目录 workflows/）")
+            f"❌ 未找到工作流模板：{name}\n"
+            f"   原因：在 ./workflows/、./、~/.workbuddy/workflows/、技能目录 workflows/ "
+            f"均未找到 <{name}>.yaml/.yml/.json\n"
+            f"   解决：① 把模板放入上述任一目录；"
+            f"② 用 router.py workflow from-text \"<任务>\" --save {name} 一键生成；"
+            f"③ 或 router.py workflow build --save {name} 交互式构建")
     return parse_template(p.read_text(encoding="utf-8", errors="replace"))
 
 
@@ -257,6 +330,112 @@ def registry_load(slug: str) -> None:
         pass
 
 
+# -------------------------------------------------- v3.0 交互构建 / 文本生成
+
+def yaml_dump(tmpl: dict) -> str:
+    """把模板 dict 转成 YAML 子集文本（与 parse_template 解析器同构）。"""
+    lines = [f'name: "{tmpl.get("name", "")}"', "steps:"]
+    for s in tmpl.get("steps", []):
+        lines.append("  - skill: " + str(s.get("skill", "")))
+        if s.get("intent"):
+            lines.append(f'    intent: "{s.get("intent")}"')
+        if s.get("input"):
+            lines.append("    input: " + str(s["input"]))
+        if s.get("output"):
+            lines.append("    output: " + str(s["output"]))
+    return "\n".join(lines) + "\n"
+
+
+def _save_dir() -> Path:
+    """模板保存目录：SKILL_ROUTER_WORKFLOW_DIR > ./workflows（若存在）> ~/.workbuddy/workflows。"""
+    env = os.environ.get("SKILL_ROUTER_WORKFLOW_DIR", "").strip()
+    if env:
+        return Path(env)
+    cwd_wf = Path.cwd() / "workflows"
+    if cwd_wf.is_dir():
+        return cwd_wf
+    return Path.home() / ".workbuddy" / "workflows"
+
+
+def save_template(tmpl: dict, name: str | None = None) -> Path:
+    """保存模板为 YAML 文件，返回路径。name 缺省取模板名，非法字符替换为 _。"""
+    name = (name or tmpl.get("name") or "workflow").strip()
+    name = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", name)
+    d = _save_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{name}.yaml"
+    p.write_text(yaml_dump(tmpl), encoding="utf-8")
+    return p
+
+
+def cli_from_text(text: str, save: str | None = None) -> int:
+    """from-text：自然语言 -> 工作流模板（可选 --save 落盘 YAML）。"""
+    try:
+        tmpl = parse_workflow(text, name=(save or ""))
+    except ValueError as e:
+        print(f"❌ {e}", file=sys.stderr)
+        return 1
+    if save:
+        try:
+            p = save_template(tmpl, save)
+        except OSError as e:
+            print(f"❌ 保存模板失败：{e}", file=sys.stderr)
+            return 1
+        print(f"✅ 已保存工作流模板：{p}")
+    else:
+        print(yaml_dump(tmpl), end="")
+        print("💡 加 --save <名称> 可保存为 YAML 模板")
+    return 0
+
+
+def cli_build(save: str | None = None) -> int:
+    """build：交互式构建工作流模板（逐步骤问答，可选 --save 落盘 YAML）。"""
+    def ask(prompt: str, default: str = "") -> str:
+        try:
+            v = input(prompt).strip()
+        except EOFError:           # 非交互环境视为跳过
+            return default
+        return v or default
+
+    print("🧱 交互式工作流构建（直接回车跳过可选字段）")
+    name = ask("工作流名称: ", "my-workflow")
+    steps: list[dict] = []
+    idx = 1
+    while True:
+        print(f"--- 步骤 {idx} ---")
+        skill = ask("  skill（技能名，如 tavily）: ")
+        if not skill:
+            if steps:
+                break
+            print("❌ 未添加任何步骤", file=sys.stderr)
+            return 1
+        intent_txt = ask("  intent（要做什么）: ", skill)
+        inp = ask("  input（读取的上下文 key，可空）: ")
+        out = ask("  output（写入的上下文 key，可空）: ", f"step{idx}.result")
+        step = {"skill": skill, "intent": intent_txt}
+        if inp:
+            step["input"] = inp
+        if out:
+            step["output"] = out
+        steps.append(step)
+        more = ask("继续添加步骤？[y/N] ", "n")
+        if more.lower() != "y":
+            break
+        idx += 1
+    tmpl = {"name": name, "steps": steps}
+    if save:
+        try:
+            p = save_template(tmpl, save)
+        except OSError as e:
+            print(f"❌ 保存模板失败：{e}", file=sys.stderr)
+            return 1
+        print(f"✅ 已保存工作流模板：{p}")
+    else:
+        print(yaml_dump(tmpl), end="")
+        print("💡 加 --save <名称> 可保存为 YAML 模板")
+    return 0
+
+
 def cli_run(sid: str, name: str, exec_fn=None) -> int:
     tmpl = load_template(name)
     return run_workflow(sid, tmpl, exec_fn=exec_fn, start=0)
@@ -294,10 +473,19 @@ def main(argv=None) -> int:
     p = sub.add_parser("run", help="执行工作流")
     p.add_argument("name", help="工作流模板名（如 research-publish）")
     sub.add_parser("resume", help="从失败断点续跑")
+    p = sub.add_parser("from-text", help="v3.0: 从自然语言生成工作流模板")
+    p.add_argument("text", help="自然语言任务描述，如 '搜索并整理AI进展'")
+    p.add_argument("--save", default=None, help="保存为 YAML 模板名")
+    p = sub.add_parser("build", help="v3.0: 交互式构建工作流模板")
+    p.add_argument("--save", default=None, help="保存为 YAML 模板名")
     a = ap.parse_args(argv)
     sid = router.require_sid(a.session)
     if a.cmd == "run":
         return cli_run(sid, a.name)
+    if a.cmd == "from-text":
+        return cli_from_text(a.text, save=a.save)
+    if a.cmd == "build":
+        return cli_build(save=a.save)
     return cli_resume(sid)
 
 

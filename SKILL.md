@@ -154,6 +154,9 @@ S="<本技能目录>/scripts"
 | `router.py workflow run <模板名>` / `workflow resume` | v2.0 多技能工作流编排：串行跑 steps，失败自动回滚并可从断点续跑 |
 | `router.py route "<任务>" --parallel` | v2.0 强制并行执行互不依赖的子任务（默认 auto 检测） |
 | `registry.py cache stats / load / evict` | v2.0 动态技能加载：查看/加载/卸载内存中的技能 |
+| `router.py workflow from-text "<任务>" [--save <名>]` | v3.0 自然语言 → 工作流模板（依赖链自动串接，可选保存 YAML） |
+| `router.py workflow build [--save <名>]` | v3.0 交互式构建工作流模板（逐步问答，可选保存 YAML） |
+| `router.py feedback list / clear / stats` | v2.1 路由反馈学习：列出 / 清空 / 统计本地反馈 |
 
 全局 `--session <id>` 可指定非活跃会话，放在子命令之前。
 
@@ -209,6 +212,37 @@ steps:
 "$PY" "$S/registry.py" cache load tavily
 "$PY" "$S/registry.py" cache evict tavily
 ```
+
+---
+
+## 自然语言工作流（v3.0）
+
+说一句话，就能生成并执行多技能工作流；也可以交互式搭建模板。
+
+### from-text：自然语言 → 模板
+
+```bash
+"$PY" "$S/router.py" workflow from-text "搜索AI进展并整理成要点"
+# name: "research_workflow"
+# steps:
+#   - skill: tavily          intent: "收集相关资料"     output: collect.result
+#   - skill: summarize       intent: "整理成结构化内容"  input: collect.result  output: structure.result
+"$PY" "$S/router.py" workflow from-text "搜索AI进展并整理成要点" --save research-publish
+# ✅ 已保存工作流模板：.../workflows/research-publish.yaml
+```
+
+解析基于 `intent.py` 的 **20 类动作词表**（搜索/整理/分析/写作/画图/发布/编程/翻译/生图/视频/规划/头脑风暴/审阅/提取/转换/问答/测试/调试/下载/安装）；存在依赖链（如 调研→整理→写作）时自动把上一步 `output` 串成下一步 `input`。
+
+### build：交互式构建
+
+```bash
+"$PY" "$S/router.py" workflow build [--save <名称>]
+# 依次输入：工作流名称、每步的 skill / intent / input / output（可空字段直接回车）
+```
+
+### 保存位置
+
+`--save` 写到 `SKILL_ROUTER_WORKFLOW_DIR`（若设置）→ `./workflows/`（若存在）→ `~/.workbuddy/workflows/`；`workflow run <名称>` 自动在这些位置查找（含 `.yaml/.yml/.json`）。
 
 ---
 

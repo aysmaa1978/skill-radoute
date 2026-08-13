@@ -37,7 +37,7 @@ AUTO_THRESHOLD = 1.2   # top1 score must clear this to auto-execute
 AUTO_MARGIN = 1.30     # top1 must beat top2 by this ratio
 CALL_STATES = ("open", "suspended", "ok", "failed", "partial", "skipped")
 
-__version__ = "2.1.0"  # skill-radoute v2.1.0（国内镜像源适配 + 路由反馈学习）
+__version__ = "3.0.0"  # skill-radoute v3.0.0（自然语言解析引擎 + 交互式工作流构建）
 
 # ----------------------------------------------------------------- route cache
 # v1.8 路由决策缓存：相同查询 + 技能集版本未变 -> 直接复用打分结果，跳过
@@ -1029,6 +1029,16 @@ def cmd_workflow_resume(a) -> int:
     return _workflow_mod().cli_resume(sid)
 
 
+def cmd_workflow_from_text(a) -> int:
+    """v3.0: 自然语言 -> 工作流模板（--save 落盘 YAML）。"""
+    return _workflow_mod().cli_from_text(a.text, save=a.save)
+
+
+def cmd_workflow_build(a) -> int:
+    """v3.0: 交互式构建工作流模板（--save 落盘 YAML）。"""
+    return _workflow_mod().cli_build(save=a.save)
+
+
 # ------------------------------------------------------------------ P1 bridges
 
 def cmd_intent_parse(a) -> int:
@@ -1206,6 +1216,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_workflow_run)
     wsub.add_parser("resume", help="从失败断点续跑（自动回滚后恢复）").set_defaults(
         fn=cmd_workflow_resume)
+    p = wsub.add_parser("from-text", help="v3.0: 从自然语言生成工作流模板")
+    p.add_argument("text", help="自然语言任务描述，如 '搜索并整理AI进展'")
+    p.add_argument("--save", default=None, help="保存为 YAML 模板名")
+    p.set_defaults(fn=cmd_workflow_from_text)
+    p = wsub.add_parser("build", help="v3.0: 交互式构建工作流模板")
+    p.add_argument("--save", default=None, help="保存为 YAML 模板名")
+    p.set_defaults(fn=cmd_workflow_build)
     return ap
 
 

@@ -27,6 +27,17 @@ TYPE_PATTERNS = {
     "translate": ["翻译", "译", "translate", "localize"],
     "image": ["图片", "图像", "海报", "生图", "配图生成", "image", "poster", "picture", "photo"],
     "video": ["视频", "短片", "动画", "video", "clip", "animation"],
+    # --- v3.0: 动作词表扩展（20+ 动作）---
+    "plan": ["规划", "计划", "排期", "里程碑", "路线图", "plan", "schedule", "roadmap", "milestone"],
+    "brainstorm": ["头脑风暴", "创意", "点子", "灵感", "brainstorm", "ideate", "idea"],
+    "review": ["审查", "审阅", "校对", "复查", "润色", "review", "proofread", "audit"],
+    "extract": ["提取", "抽取", "摘录", "提炼要点", "extract"],
+    "convert": ["转换", "格式转换", "转成", "转pdf", "convert", "transform"],
+    "qa": ["问答", "答疑", "解释", "解答", "回答", "什么是", "qa", "explain", "answer"],
+    "test": ["测试", "验证", "自测", "test", "verify", "validate"],
+    "debug": ["调试", "修复bug", "排错", "debug", "troubleshoot"],
+    "download": ["下载", "download"],
+    "install": ["安装", "install", "setup"],
 }
 
 # 领域关键词
@@ -52,10 +63,21 @@ TYPE_SKILLS = {
     "translate": ["translate"],
     "image": ["image-gen", "poster"],
     "video": ["video-gen"],
+    # --- v3.0 新动作的建议技能 ---
+    "plan": ["project-planner"],
+    "brainstorm": ["ideation"],
+    "review": ["review-skill"],
+    "extract": ["summarize"],
+    "convert": ["convert-skill"],
+    "qa": ["assistant-chat"],
+    "test": ["fullstack-dev"],
+    "debug": ["fullstack-dev"],
+    "download": ["web-search"],
+    "install": ["acquire"],
 }
 
 # 类型顺序（用于稳定输出与意图标签）
-TYPE_ORDER = ["collect", "structure", "analyze", "write", "visualize", "publish", "code", "translate", "image", "video"]
+TYPE_ORDER = ["collect", "structure", "analyze", "write", "visualize", "publish", "code", "translate", "image", "video", "plan", "brainstorm", "review", "extract", "convert", "qa", "test", "debug", "download", "install"]
 
 # v2.0: 子任务依赖图（type -> 必须先完成的 type）。用于判定多子任务能否并行：
 # 存在依赖边（如 调研->写作）必须串行；无依赖边（如 写作+画图）可并行。
@@ -70,6 +92,17 @@ DEPENDS_ON: dict[str, tuple[str, ...]] = {
     "video": (),
     "code": (),
     "translate": (),
+    # --- v3.0 新动作的依赖 ---
+    "plan": (),
+    "brainstorm": (),
+    "review": ("write",),
+    "extract": ("collect",),
+    "convert": (),
+    "qa": (),
+    "test": ("code",),
+    "debug": ("code",),
+    "download": (),
+    "install": (),
 }
 
 
@@ -104,6 +137,17 @@ TEMPLATE_TARGET = {
     "translate": "翻译内容",
     "image": "生成图像",
     "video": "生成视频",
+    # --- v3.0 新动作的模板 target ---
+    "plan": "制定计划/排期",
+    "brainstorm": "产出创意方案",
+    "review": "审查/校对内容",
+    "extract": "提取关键信息",
+    "convert": "格式/内容转换",
+    "qa": "问答/解释说明",
+    "test": "测试与验证",
+    "debug": "调试与修复",
+    "download": "下载资源",
+    "install": "安装/配置",
 }
 
 
@@ -138,6 +182,12 @@ def _intent_label(types: list):
         "visualize": "visualize",
         "code": "implement",
         "translate": "translate",
+        # v3.0 新增组合标签
+        "collect+structure+write+publish": "research_write_publish",
+        "code+test": "implement_and_test",
+        "write+review": "write_review",
+        "collect+extract+structure": "research",
+        "plan+write": "plan_and_write",
     }
     if key in table:
         return table[key]

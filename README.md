@@ -145,7 +145,72 @@ skill-radoute/
 └── README.md
 ```
 
+## 快速场景
+
+按场景抄命令即可上手（`$S` = `<技能目录>/scripts`，`$PY` = `python3`）。
+
+### 场景一：一句话生成并执行调研→整理→发布工作流（v3.0）
+
+```bash
+# 从自然语言直接生成工作流模板并保存
+"$PY" "$S/router.py" workflow from-text "搜索AI进展，整理成要点，写成公众号文章" --save research-publish
+# 开会话并执行（skill 会被逐一调用，上下文自动传递）
+"$PY" "$S/router.py" session new --goal "调研发布" --mode auto
+"$PY" "$S/router.py" workflow run research-publish
+```
+
+### 场景二：交互式搭一个「翻译→校对」工作流（v3.0）
+
+```bash
+"$PY" "$S/router.py" workflow build --save translate-review
+# 按提示依次输入：名称 / skill / intent / input / output，回车跳过可选字段
+```
+
+### 场景三：不知道用哪个技能时，先查后路由
+
+```bash
+"$PY" "$S/registry.py" search "帮我整理AI资料画架构图" --top 5   # 只看打分排序
+"$PY" "$S/router.py" route "帮我整理AI资料画架构图" --explain     # 看决策理由
+"$PY" "$S/router.py" route "帮我整理AI资料画架构图" --exclude drawio-skill  # 否决后重试
+```
+
+### 场景四：本地没合适技能，远程装一个
+
+```bash
+# 国内网络先配镜像/代理（二选一，见 FAQ Q6/Q7）
+set SKILL_RADOUTE_MIRROR=https://hub.fastgit.xyz,https://gitclone.com
+"$PY" "$S/acquire.py" run --query "海报" --auto
+```
+
+### 场景五：路由越用越准（反馈学习）
+
+```bash
+"$PY" "$S/router.py" feedback stats         # 查看已积累的反馈
+# 路由结果不理想时记录反馈（chosen=选中的，excluded=否决的）
+python -c "import sys; sys.path.insert(0, '$S'); import learning; \
+learning.record_feedback('帮我写公众号文章', ['drawio-skill'], 'wechat-publisher')"
+"$PY" "$S/router.py" feedback list          # 确认已记录
+```
+
 ## 更新日志
+
+> 只保留最近 3 个版本，完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v3.0.0（自然语言编排 + 交互式工作流）
+
+把「说一句话就能跑多技能工作流」变成现实，并针对 v2.1 评测（综合 4.7）打磨文档与体验。
+
+- **自然语言解析引擎（NLP）**：`intent.py` 动作词表从 10 类扩展至 **20 类**（新增 规划/头脑风暴/审阅/提取/转换/问答/测试/调试/下载/安装），并给出依赖图与建议技能；`workflow.parse_workflow(text)` 把一句话直接解析成可运行的工作流模板，依赖链自动串接上下文。
+- **交互式工作流构建**：`router.py workflow from-text "搜索并整理AI进展"` 从自然语言生成模板；`router.py workflow build` 逐步问答构建模板；两者都支持 `--save <名称>` 落盘为 YAML。
+- **文档与规范**：README 更新日志精简至最近 3 版（历史移至 `CHANGELOG.md`）、FAQ 扩展至 20+ 条、新增「快速场景」章节。
+- **体验打磨**：异常提示统一「原因 + 解决建议」两步式；本地反馈数据接入工作流技能推荐（`registry.py search` 加权）。
+- 测试：新增 `test_workflow_nlp.py`（20 动作识别 + 24 条自然语言用例准确率 100% + build/from-text/--save），原 5 套测试全绿；纯标准库零新依赖，接口向后兼容。
+
+### v2.1.0（国内镜像源适配 + 路由反馈学习）
+
+- **P0 镜像适配**：`finder.py` 多源自动切换（`MIRRORS`：github.com / hub.fastgit.xyz / gitclone.com，失败自动切换并提示；`SKILL_RADOUTE_MIRROR` 环境变量可覆盖）；`acquire.py` 自动启用 `HTTP_PROXY`/`HTTPS_PROXY`/`GITHUB_PROXY` 并给出无代理指引；`quickstart.bat` 新增镜像配置步骤。
+- **P1 反馈学习**：新增 `learning.py`（本地 `~/.workbuddy/feedback.json`，绝不上传）；`registry.score_skill` 任务相似度 > 0.8 时 chosen +1.5×weight、excluded −2.0×weight；`router.py feedback list|clear|stats`；反馈变化自动失效路由缓存。
+- 测试：新增 `test_learning.py`（38 断言），原 4 套测试全绿。
 
 ### v2.0.0（多技能编排引擎）
 
@@ -155,38 +220,6 @@ skill-radoute/
 - **并行执行引擎（parallel）**：`intent.py` 按依赖图给子任务分层（无依赖 `parallelizable: true`，有依赖如 调研→写作 `false`）；`route` 输出自带 `parallel_groups` 分层计划，`route --parallel` 强制并行；`router.run_parallel()` 基于 ThreadPoolExecutor 并发执行，总耗时约等于最慢子任务。
 - **动态技能加载（dynamic loading）**：路由只加载候选 top3 元数据（索引驻留、零磁盘读取）；执行时按需加载完整内容（SKILL.md + scripts），LRU 保留最近 5 个自动卸载；`registry.py cache stats / load / evict` 管理。
 - 向后兼容：`route` / `acquire` / `call` 公开接口不变；纯标准库，零新依赖。
-
-### v1.4.0
-- **CJK 短查询提权**：归一化分母改用 `query_mass()`（Latin 词=1，CJK 每 2 字=1），修复 n-gram 展开致中文查询比同义英文低约 35% 的根因；8 个真实中文查询打分提升 1.21x–1.45x（如「画架构图」5.68→7.64）。
-- **词干泄漏收窄**：新增 `_stem_match()`，要求共享前缀覆盖较长词的 >50%，修复 `data~database` / `auto~automation` / `mark~marketplace` / `word~wordpress` 等误命中抬高错配技能的问题。
-- **停用词 n-gram 泄漏修复**：扩展功能字停用词表并在 `bump()` 内整串丢弃，修复 `帮我遛狗` / `我想学游泳` 等纯语法碎片越过 0.5 自动地板的问题；越界查询最高分从 2.49 降至 0.81，且经守卫落 `confirm` 不误判 `auto`（0.5 阈值本身不动）。
-- **call 链路冒烟测试**：新增 `test_call_chain.py`（16 断言，覆盖 open/close/switch/resume 与栈状态），可捕获 d449b38 类静默回归；`test_scoring.py` 锁定 14 条打分不变量。
-- 回归：54 例全量测试仅 1 处差异且为改进，clear 集 auto 率 51.6%→54.8%，零退化。
-
-### v1.5.0
-- **`route --explain` 透明路由报告**：新增 `--explain` 标志，输出 `top_candidates`（候选技能列表）、`score_breakdown`（每个候选的名称/描述/标签分项 + 语义同义命中）、`decision_reason`（为何 auto / confirm / no_match / decompose），若为 `confirm` 额外给出 `missing_trigger`（为何没自动选中，如分数低于阈值、领先幅度不足、同族冲突）。输出 `json.dumps(indent=2)`，仅解释用，不动正常路由的 emitschema（新增 `test_explain.py` 14 断言锁契约）。
-- **轻量语义匹配（同义词提升）**：`registry.py` 引入预置中英同义词表（search↔查找/搜索/检索、draw↔画图/绘制/绘图、write↔撰写/创作/写作），查询词与技能自身 token 落入同一同义组时按 `SEMANTIC_WEIGHT=0.3` 加权重分。纯数据驱动、无嵌入模型、零新依赖；加分仅当「技能本身含同组成员」触发，故无关技能拿不到语义分，杜绝误判。
-- 验收：54 例全量回归与 v1.4 基线**零决策差异**，clear 集 auto 率维持 54.8% 不降；`查找最新的AI新闻` / `search the web for ai news` 均将 tavily 识别为首选；跨语种变体 `帮我检索一下今天的人工智能新闻` 经同义词正确拉升 tavily（`sem_gain=0.3`）。
-- **弱匹配守卫（no_match 复活）**：`router.py` 新增 weak-match guard——top1 分数 < 0.5 或命中理由全部为单字/停用词时直接判 `no_match` 并走远程获取链路，越界输入不再被错误技能「伪装成可确认」；守卫停用词表已收窄（仅保留冠词/代词/介词等功能词，移出 `create/new/make` 等动作动词），消除 `create a new skill` 被误判丢弃正确技能的问题。54 例真实回归：2 例越界精准复活、0 例误伤（确定性 100%，3 轮逐字节一致）。
-- **（云鼎安全修复）可信下载源**：移除未经验证的 `lightmake.site` CDN；`finder.py` 改为从「受信发布表」`TRUSTED_RELEASES` 按 slug + 显式版本解析，下载 URL 统一走带签名的 GitHub Releases（`GITHUB_RELEASE`）。SkillHub 官方 registry 端点就绪前，GitHub Releases 即为可信备用源。
-- **（云鼎安全修复）SHA256 哈希校验**：`acquire.py` 下载后比对 zip 的 SHA256 与硬编码在 `KNOWN_SKILLS` 的预期值（绝不从远程获取）。未预置哈希或哈希不匹配的包直接删除并报错退出，不进入安装流程。
-- **（云鼎安全修复）版本锁定 + 人工确认**：获取请求必须显式携带版本号（禁止仅凭 slug 动态解析 `latest`）；P0 高风险包恒需交互确认，`--auto`/`--force` 均不绕过；`--auto` 模式仅对「已预置哈希且版本锁定」的技能自动获取，其余降级为人工确认。
-- 验收（安全）：新技能下载走 GitHub Releases + 哈希校验；已预置哈希的技能安装成功，未预置的报错退出并提示“请联系作者更新”；云鼎复扫时三个问题点均消除。
-
-### v1.3.0
-- **兄弟技能消歧**：top1 与 top2 同 tier 且名称前缀重叠（同族）时强制 `confirm`，不再靠分数硬选，`reason` 标 `[SIBLING]`。修复 PowerPoint / tencent-doc / edit-word / weixin-pay 等同族技能被误自动选中的问题。
-- **多意图检测**：`route` 每次都跑 `intent.parse`，解析出 ≥2 个不同任务类型时返回 `decompose` 并附 `sub_task_plan`（每子任务类型 + 建议技能），不再盲目取 top1。多意图是 query 的属性，与候选强弱无关，优先级高于 `auto` / `no_match` / 弱匹配；`[SIBLING]` 仍为最高优先。
-- 修复 call close 命令中 stack 弹出逻辑（回归于 d449b38）。
-
-### v1.2.1（安全补丁）
-- **弱匹配守卫停用词收窄**：移除 `create/new/make/build/run/use/go` 等动作动词，仅保留无意义功能词，修复 `create a new skill` 被误判 `no_match` 丢弃正确技能的问题。
-- **远程获取完整性校验**：`acquire.py` 下载 zip 后校验可读且含 `SKILL.md`，损坏/伪造包自动删除并报错，不进安装流程。
-- **获取链路安全收紧**：P0 高危包恒需交互确认，`--auto`/`--force` 均不绕过；`--force` 仅覆盖已安装目录。
-- **文档**：`--auto`/`--force` 表述与代码对齐（注：`lightmake.site` 源已于 v1.5 移除，改用带签名 GitHub Releases + SHA256 校验）。
-
-### v1.2
-- 上下文池版本化（`ctx history` / `ctx rollback`）。
-- 需求雷达 `intent` 与边界哨兵 `sentinel`，`route --guard` 前置拦截越界任务。
 
 ## License
 
@@ -238,3 +271,121 @@ export GITHUB_PROXY=http://127.0.0.1:7890
 3. top1 明显不适合时，用 `--exclude <技能名>` 否决后重新路由，否决动作会留在 trace 里。
 4. 判定为多意图返回 `decompose` 时，按 `sub_task_plan` 拆成多个子任务逐个路由，不要硬套单技能。
 5. 需要调整阈值或同义表时，参见 `references/routing-rules.md`。分数只是词法先验，最终选谁由模型结合 description 判断。
+
+### Q6：如何配置国内镜像源加速下载？
+
+设置 `SKILL_RADOUTE_MIRROR` 环境变量即可覆盖默认镜像列表（默认 `github.com` → `hub.fastgit.xyz` → `gitclone.com`，逗号或空白分隔多个）：
+
+```bash
+# Windows (cmd)
+setx SKILL_RADOUTE_MIRROR "https://hub.fastgit.xyz,https://gitclone.com"
+# PowerShell / macOS / Linux
+$env:SKILL_RADOUTE_MIRROR="https://hub.fastgit.xyz,https://gitclone.com"
+export SKILL_RADOUTE_MIRROR="https://hub.fastgit.xyz,https://gitclone.com"
+```
+
+下载失败时 `finder.py` 会自动切换下一个镜像并打印「⚠️ GitHub 连接超时，切换至国内镜像源...」。`quickstart.bat` 也内置了该配置的可选步骤。
+
+### Q7：设置了代理还是不生效？
+
+`acquire.py` 按 `GITHUB_PROXY` → `HTTPS_PROXY` → `HTTP_PROXY` 优先级读取。检查：
+
+1. 变量名拼写正确（`HTTPS_PROXY` 不是 `HTTPS_PROXY_`，注意 `HTTP_PROXY` 在某些环境会被系统程序忽略，用 `HTTPS_PROXY` 更稳）。
+2. 代理地址格式：`http://127.0.0.1:7890`（带协议头）。
+3. 启动时打印「✅ 已检测到代理配置」才说明读到了；没有该提示说明变量没进进程环境，重启终端再试。
+
+### Q8：路由反馈学习是什么？数据安全吗？
+
+v2.1 起，路由可以「越用越准」：记录某类任务否决了哪些技能、最终选了哪个，下次相似任务（相似度 > 0.8）打分时自动加权（chosen +1.5×weight、excluded −2.0×weight）。数据只存本机 `~/.workbuddy/feedback.json`，**绝不上传**；随时可用 `router.py feedback clear` 一键清空。详见 SKILL.md「路由反馈学习」一节。
+
+### Q9：feedback 文件损坏或想重置怎么办？
+
+反馈文件在 `~/.workbuddy/feedback.json`（`SKILL_RADOUTE_FEEDBACK` 可改路径）。文件损坏时程序自动按空表处理，不会崩溃；彻底重置就执行 `router.py feedback clear`，或直接删除该文件。
+
+### Q10：如何从一句话生成工作流？
+
+```bash
+"$PY" "$S/router.py" workflow from-text "搜索AI进展并整理成要点"            # 打印 YAML 模板
+"$PY" "$S/router.py" workflow from-text "搜索AI进展并整理成要点" --save rp   # 保存为 YAML
+```
+
+`parse_workflow` 基于 `intent.py` 的 20 类动作词表拆分子任务，自动把依赖链（如 调研→整理）串成 `input/output` 上下文传递。
+
+### Q11：workflow build 交互构建怎么用？
+
+```bash
+"$PY" "$S/router.py" workflow build            # 逐步问答
+"$PY" "$S/router.py" workflow build --save x   # 构建完直接保存
+```
+
+按提示依次输入名称、每个步骤的 skill/intent/input/output（可选字段直接回车跳过），最后回车结束（或输入 n 停止添加步骤）。
+
+### Q12：工作流执行失败怎么恢复？
+
+任一步失败会自动**回滚该步写入**（前序步骤结果保留），然后：
+
+```bash
+"$PY" "$S/router.py" workflow resume    # 从失败断点续跑，不重复已完成步骤
+```
+
+如果提示「没有可恢复的工作流」，说明已完成或从未运行，直接 `workflow run <模板名>` 重跑即可。
+
+### Q13：模板文件应该放在哪里？
+
+`workflow run` 按序查找：`./workflows/<名>` → `./<名>` → `~/.workbuddy/workflows/<名>` → 技能目录 `workflows/<名>`（支持 `.yaml`/`.yml`/`.json`，可省略扩展名）。`--save` 保存时写到 `SKILL_ROUTER_WORKFLOW_DIR`（若设置）→ `./workflows/`（若存在）→ `~/.workbuddy/workflows/`。
+
+### Q14：如何触发多技能并行执行？
+
+当任务包含多个互不依赖的子任务（如「写文章并画架构图」）时，`intent.parse` 会标记 `parallelizable: true`；用 `router.py route "任务" --parallel` 强制并行执行。有依赖链的任务（调研→写作）必须串行，不会误并行。
+
+### Q15：为什么路由结果是 confirm 而不是 auto？
+
+`route --explain` 会给出 `decision_reason` 与 `missing_trigger`，常见原因：top1 分数低于自动阈值、领先 top2 幅度不足、同族技能冲突、多意图判定为 decompose。按 FAQ Q5 的步骤用 `--exclude` 否决或拆分任务即可。
+
+### Q16：sentinel 误拦/误预警怎么办？
+
+安全黑名单是硬阻断（`proceed:false`），确认任务确实合规后可调整规则文件 `~/.workbuddy/sentinel_rules.json`（`SKILL_ROUTER_SENTINEL_RULES` 可改路径）；能力/资源类预警只提示不阻断，可忽略。改完规则无需重启。
+
+### Q17：Windows 控制台输出中文乱码？
+
+这是终端编码问题，不是数据问题（文件本身是 UTF-8）：
+
+```bash
+chcp 65001                  # cmd 切换到 UTF-8
+$env:PYTHONIOENCODING="utf-8"   # PowerShell 下强制 Python UTF-8 输出
+```
+
+### Q18：如何给项目跑测试？
+
+```bash
+python3 scripts/test_acquire.py        # 安全修复契约（16 断言）
+python3 scripts/test_scoring.py        # 打分不变量
+python3 scripts/test_call_chain.py     # call 生命周期冒烟
+python3 scripts/test_explain.py        # route --explain 契约
+python3 scripts/test_workflow.py       # v2.0 编排引擎契约（40 断言）
+python3 scripts/test_workflow_nlp.py   # v3.0 NLP 解析（20 动作 + 24 用例准确率 100%）
+python3 scripts/test_learning.py       # v2.1 反馈学习（38 断言）
+```
+
+全部通过输出末尾应包含 `PASS` 或 `0 failed`。
+
+### Q19：技能安装到哪个目录？怎么卸载？
+
+`acquire.py` 安装到 `~/.workbuddy/skills/<技能名>/`；卸载直接删除该目录，然后执行 `registry.py scan` 刷新索引（避免残留缓存）。
+
+### Q20：如何确认当前版本？
+
+- git 安装：`git describe --tags`（如 `v2.1.0`）。
+- 发布包安装：文件名自带版本号（`skill-radoute-v2.1.0.skill.zip`）。
+- 文档：README「更新日志」与 `CHANGELOG.md` 按版本倒序记录。
+
+### Q21：git push 报认证失败（Invalid username or token）？
+
+GitHub 已禁用密码认证，必须用 Personal Access Token（PAT，需 `repo` 权限）。两种方式：
+
+1. 在系统设置好凭据后正常 `git push`（GCM 会弹浏览器登录）。
+2. 临时用令牌：`git push https://<用户名>:<令牌>@github.com/<用户>/<仓库>.git main`（令牌会出现在命令历史，用完建议轮换）。
+
+### Q22：反馈数据如何接入工作流推荐？
+
+`registry.search` 打分时已自动应用本地反馈加权（v2.1 起）；v3.0 起 `workflow from-text` 生成模板时，步骤的技能推荐同样走 `intent.TYPE_SKILLS`，若该技能在反馈中被否决过，路由阶段会体现减分。想让推荐更准，就多用 `learning.record_feedback` 积累反馈（见场景五）。
