@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import registry  # noqa: E402
 import intent  # noqa: E402
 import sentinel  # noqa: E402
+import learning  # noqa: E402  (v2.1 路由反馈学习)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -36,7 +37,7 @@ AUTO_THRESHOLD = 1.2   # top1 score must clear this to auto-execute
 AUTO_MARGIN = 1.30     # top1 must beat top2 by this ratio
 CALL_STATES = ("open", "suspended", "ok", "failed", "partial", "skipped")
 
-__version__ = "1.8.0"  # skill-radoute v1.8.0（性能优化：增量扫描/路由缓存/内存驻留）
+__version__ = "2.1.0"  # skill-radoute v2.1.0（国内镜像源适配 + 路由反馈学习）
 
 # ----------------------------------------------------------------- route cache
 # v1.8 路由决策缓存：相同查询 + 技能集版本未变 -> 直接复用打分结果，跳过
@@ -64,6 +65,8 @@ def _route_cache_key(a, mode: str) -> str:
         "exclude=" + ",".join(sorted(e.lower() for e in (a.exclude or []))),
         "explain=" + str(bool(getattr(a, "explain", False))),
         "skills=" + registry.skills_fingerprint(),
+        # v2.1: 反馈学习数据变化时旧路由缓存自动失效（文件 mtime+size 指纹）
+        "fb=" + learning.feedback_fingerprint(),
     ]
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
@@ -970,6 +973,36 @@ def cmd_acquire_log(a) -> int:
     return 0
 
 
+# ------------------------------------------------- v2.1 路由反馈学习 (P1)
+
+def cmd_feedback_list(a) -> int:
+    """列出所有本地反馈条目（数据仅存于 ~/.workbuddy/feedback.json）。"""
+    fbs = learning.list_all()
+    if not fbs:
+        print("(no feedback entries)")
+        return 0
+    for i, fb in enumerate(fbs, 1):
+        print(f"{i}. task={fb.get('task')!r} chosen={fb.get('chosen')!r} "
+              f"excluded={fb.get('excluded', [])!r} "
+              f"weight={fb.get('weight', 1.0)} ts={fb.get('timestamp', 0):.0f}")
+    return 0
+
+
+def cmd_feedback_clear(a) -> int:
+    """清空全部反馈并失效路由缓存（避免旧权重继续生效）。"""
+    n = learning.clear()
+    invalidate_route_cache()
+    print(f"cleared {n} feedback entr{'y' if n == 1 else 'ies'}")
+    return 0
+
+
+def cmd_feedback_stats(a) -> int:
+    """统计反馈：总记录数 + 覆盖任务数。"""
+    s = learning.stats()
+    print(f"entries={s['entries']} tasks={s['tasks']}")
+    return 0
+
+
 # ------------------------------------------------------------ v2.0 workflow
 
 def _workflow_mod():
@@ -1156,6 +1189,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--path", default="")
     p.add_argument("--note", default="")
     p.set_defaults(fn=cmd_acquire_log)
+
+    fb = sub.add_parser("feedback", help="v2.1: 路由反馈学习（本地记录/清空/统计）")
+    fbsub = fb.add_subparsers(dest="sub", required=True)
+    fbsub.add_parser("list", help="列出所有反馈（初始为空）").set_defaults(
+        fn=cmd_feedback_list)
+    fbsub.add_parser("clear", help="清空所有反馈").set_defaults(
+        fn=cmd_feedback_clear)
+    fbsub.add_parser("stats", help="统计总记录数与覆盖任务数").set_defaults(
+        fn=cmd_feedback_stats)
 
     wf = sub.add_parser("workflow", help="v2.0: 多技能工作流编排引擎")
     wsub = wf.add_subparsers(dest="sub", required=True)

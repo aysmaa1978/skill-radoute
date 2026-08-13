@@ -60,6 +60,26 @@ if errorlevel 1 (
 )
 echo [ok] Now in %CD%
 
+rem ---------- 2.5 optional: China mirror config (v2.1) ----------
+echo.
+echo [2.5/3] Optional: configure China mirror source?
+echo   Downloads from github.com may time out on CN networks.
+echo   Enabling mirrors sets SKILL_RADOUTE_MIRROR so finder.py
+echo   automatically falls back to CN mirrors on failure.
+set "MIRROR_YN="
+set /p MIRROR_YN=Enable CN mirror source (SKILL_RADOUTE_MIRROR)? [y/N] 
+if /i "%MIRROR_YN%"=="y" (
+    setx SKILL_RADOUTE_MIRROR "https://hub.fastgit.xyz,https://gitclone.com" >nul
+    if errorlevel 1 (
+        echo [!] Failed to set SKILL_RADOUTE_MIRROR
+    ) else (
+        echo [ok] SKILL_RADOUTE_MIRROR set to CN mirror list.
+        echo      Restart your terminal for it to take effect.
+    )
+) else (
+    echo [skip] Using default source ^(github.com^).
+)
+
 rem ---------- 3. run acquire ----------
 echo.
 echo [3/3] Fetching skill package (tavily)...

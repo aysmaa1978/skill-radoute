@@ -139,9 +139,14 @@ def _download(sel: dict) -> Path:
     req = urllib.request.Request(url, headers={"User-Agent": "skill-radoute/1.7"})
     # 国内网络适配：优先读 GITHUB_PROXY，其次标准 HTTPS_PROXY/HTTP_PROXY。
     # urllib 默认不识别自定义变量 GITHUB_PROXY，这里显式装配 ProxyHandler。
-    proxy = (os.environ.get("GITHUB_PROXY")
-             or os.environ.get("HTTPS_PROXY")
-             or os.environ.get("HTTP_PROXY"))
+    # v2.1 (P0): 标准 HTTP_PROXY/HTTPS_PROXY 自动生效，并打印启用提示；
+    # 下载失败且未配置代理时给出 HTTP_PROXY 设置指引。
+    proxy_env = os.environ.get("GITHUB_PROXY") or os.environ.get("HTTPS_PROXY") \
+        or os.environ.get("HTTP_PROXY")
+    proxy = proxy_env
+    if proxy:
+        print(f"✅ 已检测到代理配置（{proxy_env}），下载将走代理。",
+              file=sys.stderr)
     opener = (urllib.request.build_opener(
         urllib.request.ProxyHandler({"https": proxy, "http": proxy}))
         if proxy else None)
@@ -171,9 +176,13 @@ def _download(sel: dict) -> Path:
                       file=sys.stderr)
                 time.sleep(wait)
     else:
+        # v2.1 (P0): 无代理时给出 HTTP_PROXY 设置指引；有代理但超时时提示换代理。
         hint = ""
-        if isinstance(last_err, (TimeoutError,)) or "timed out" in str(last_err).lower():
-            hint = "（网络超时）请检查连接，或设置 GITHUB_PROXY=http://代理地址 后重试。"
+        if not proxy:
+            hint = ("如需使用代理，请设置 HTTP_PROXY=http://代理地址 后重试"
+                    "（或使用 GITHUB_PROXY 指定专用代理）。")
+        elif isinstance(last_err, (TimeoutError,)) or "timed out" in str(last_err).lower():
+            hint = "（网络超时）请检查连接，或更换代理后重试。"
         raise RuntimeError(
             f"❌ 下载失败：已重试 3 次仍无法连接（{last_err}）。{hint}"
             f"请检查网络，然后执行 python acquire.py resume 继续。")

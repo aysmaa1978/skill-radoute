@@ -22,11 +22,39 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
+import urllib.request
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
+
+
+# v2.1 (P0 国内镜像源适配): 下载失败时按顺序尝试的镜像源列表。
+# 环境变量 SKILL_RADOUTE_MIRROR 可覆盖默认列表（逗号/空白分隔多个地址）。
+MIRRORS = [
+    "https://github.com",
+    "https://hub.fastgit.xyz",
+    "https://gitclone.com",
+]
+MIRROR_ENV = "SKILL_RADOUTE_MIRROR"
+
+
+def mirrors() -> list[str]:
+    """返回镜像源列表：优先读 SKILL_RADOUTE_MIRROR 环境变量，否则用内置默认。
+
+    环境变量值可用逗号、分号或空白分隔多个镜像地址（如
+    `SKILL_RADOUTE_MIRROR="https://github.com,https://gitclone.com"`）。
+    返回的是副本，不会污染模块级 MIRRORS。
+    """
+    env = os.environ.get(MIRROR_ENV, "").strip()
+    if env:
+        parts = [p.strip() for p in re.split(r"[,;\s]+", env) if p.strip()]
+        if parts:
+            return parts
+    return list(MIRRORS)
 
 
 class FinderError(RuntimeError):
@@ -56,8 +84,12 @@ TRUSTED_RELEASES: dict[str, dict] = {
 }
 
 
-def build_release_url(slug: str, version: str) -> str:
-    """Build a signed GitHub Releases download URL. Never resolves `latest`."""
+def build_release_url(slug: str, version: str,
+                      mirror: str = "https://github.com") -> str:
+    """Build a signed GitHub Releases download URL. Never resolves `latest`.
+
+    `mirror` 可指定镜像源基址（v2.1），默认 GitHub 官方，向后兼容。
+    """
     rel = TRUSTED_RELEASES.get(slug)
     if not rel:
         raise FinderError(
@@ -68,7 +100,41 @@ def build_release_url(slug: str, version: str) -> str:
     asset = rel.get("asset") or f"{slug}.skill.zip"
     if "{version}" in asset:                     # 文件名带版本号时自动填充
         asset = asset.format(version=version)
-    return f"https://github.com/{repo}/releases/download/{version}/{asset}"
+    return f"{mirror.rstrip('/')}/{repo}/releases/download/{version}/{asset}"
+
+
+def download(slug: str, version: str, timeout: int = 30,
+             user_agent: str = "skill-radoute/2.1") -> tuple[bytes, str]:
+    """按镜像顺序下载技能包，失败自动切换，返回 (内容字节, 最终 URL)。
+
+    v2.1 (P0): 依次尝试 mirrors() 中每个镜像源；某个源连接失败/超时即自动
+    切换到下一个，并在 stderr 打印中文提示。全部失败抛 FinderError。
+    HTTP_PROXY / HTTPS_PROXY 环境变量由 urllib 默认代理处理器自动生效。
+
+    注意：本函数只负责下载，不校验哈希（校验在 acquire._verify_hash）。
+    """
+    sources = mirrors()
+    last_err: Exception | None = None
+    first_url = ""
+    for i, base in enumerate(sources):
+        url = build_release_url(slug, version, mirror=base)
+        first_url = first_url or url
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read(), url
+        except Exception as e:  # 网络超时/不可达/HTTP 错误 -> 切换下一个
+            last_err = e
+            if i < len(sources) - 1:
+                if base == "https://github.com":
+                    print(f"⚠️ GitHub 连接超时，切换至国内镜像源 {sources[i + 1]} ...",
+                          file=sys.stderr)
+                else:
+                    print(f"⚠️ 镜像源 {base} 连接失败（{e}），切换至 {sources[i + 1]} ...",
+                          file=sys.stderr)
+    raise FinderError(
+        f"❌ 下载失败：已尝试全部 {len(sources)} 个镜像源（{last_err}）。"
+        f"可设置 SKILL_RADOUTE_MIRROR 或 HTTP_PROXY 后重试。首个地址：{first_url}")
 
 
 def search(query: str, source: str = "github", limit: int = 10,

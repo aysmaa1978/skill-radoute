@@ -26,9 +26,16 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
+import learning  # noqa: E402  (v2.1 路由反馈学习：本地反馈加权)
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
+
+# v2.1 (P1 路由反馈学习): 反馈加权系数——任务相似时 chosen +1.5、excluded -2.0，
+# 乘以该反馈条目的 weight（1.0 全量，0.5 减半）。
+FB_CHOSEN_BOOST = 1.5
+FB_EXCLUDED_PENALTY = 2.0
 
 # ---------------------------------------------------------------- source tiers
 
@@ -726,13 +733,18 @@ def build_idf(records: list) -> dict:
 
 
 def score_skill(qtoks: dict, query_lc: str, rec: dict,
-                idf: dict | None = None) -> tuple[float, list[str], dict]:
+                idf: dict | None = None,
+                feedback: list | None = None) -> tuple[float, list[str], dict]:
     """Return (score, why, detail).
 
     `detail` carries the lexical sub-scores plus the semantic-boost breakdown so
     callers such as `route --explain` can render a transparent score_breakdown.
     The return arity grows from 2 to 3; non-explain callers keep unpacking the
     first two values and ignore `detail`.
+
+    v2.1 (P1): 传入 `feedback`（反馈条目列表）时，若当前任务与某条反馈的
+    task 相似度 > 0.8，则 chosen 技能 +1.5*weight、excluded 技能 -2.0*weight。
+    不传或传空列表 = 无加权，保持 v2.0 行为完全一致（向后兼容）。
     """
     idf = idf or {}
     name = str(rec.get("name", "")).lower()
@@ -767,7 +779,9 @@ def score_skill(qtoks: dict, query_lc: str, rec: dict,
         "semantic_gain": round(sem_gain, 4),
         "raw": round(raw, 4),
     }
-    if raw <= 0:
+    # v2.1 (P1): 有反馈时不得因 raw<=0 提前返回——excluded 技能往往是
+    # 零分词，必须让 -2.0 权重生效（负分由 search 的 s>0 过滤自然剔除）。
+    if raw <= 0 and not feedback:
         detail["final"] = 0.0
         return 0.0, why, detail
     # normalize against query size so long queries do not inflate scores.
@@ -777,6 +791,27 @@ def score_skill(qtoks: dict, query_lc: str, rec: dict,
     final = norm * tw
     detail["norm"] = round(norm, 4)
     detail["tier_weight"] = tw
+    # --- v2.1 (P1 路由反馈学习): 反馈加权 ---
+    # 仅当调用方显式传入 feedback 时生效（search() 每次加载一次），
+    # 直接调用 score_skill 且不传时行为与 v2.0 完全一致。
+    fb_boost = 0.0
+    if feedback:
+        name_lc = (name or str(rec.get("name", ""))).lower()
+        for fb in feedback:
+            fb_task = str(fb.get("task", ""))
+            if learning.similarity(query_lc, fb_task) <= learning.SIMILARITY_THRESHOLD:
+                continue
+            w = float(fb.get("weight", 1.0))
+            if name_lc == str(fb.get("chosen", "")).lower():
+                gain = FB_CHOSEN_BOOST * w
+                fb_boost += gain
+                why.append(f"反馈加权: 任务相似（chosen） +{gain:.2f}")
+            elif name_lc in [str(x).lower() for x in (fb.get("excluded") or [])]:
+                pen = FB_EXCLUDED_PENALTY * w
+                fb_boost -= pen
+                why.append(f"反馈加权: 任务相似（excluded） -{pen:.2f}")
+        final = final + fb_boost
+        detail["feedback_boost"] = round(fb_boost, 4)
     detail["final"] = round(final, 4)
     return round(final, 4), why, detail
 
@@ -788,11 +823,14 @@ def search(query: str, top: int = 5, source: str | None = None,
     qlc = (query or "").lower()
     records = reg.get("skills", [])
     idf = build_idf(records)
+    # v2.1 (P1): 每次搜索加载一次本地反馈，应用到本次打分；
+    # 反馈文件缺失/损坏时 learning 返回空表，行为与 v2.0 一致。
+    feedback = learning.all_feedback()
     out = []
     for rec in records:
         if source and rec.get("tier") != source:
             continue
-        s, why, detail = score_skill(qtoks, qlc, rec, idf)
+        s, why, detail = score_skill(qtoks, qlc, rec, idf, feedback)
         if s > 0:
             item = {
                 "name": rec["name"], "tier": rec["tier"], "score": s,
