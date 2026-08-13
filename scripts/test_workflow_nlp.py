@@ -269,6 +269,26 @@ def test_error_hints():
         check("no-action has 解决", "解决" in msg, True)
 
 
+# ------------------------------------------- 规则引擎报告 #R1 回归（v3.0.1）
+def test_rule_engine_regressions():
+    """规则引擎测试报告（v3.0.0）发现的 4 例单意图误拆，修复后必须恢复单意图。"""
+    cases = [
+        ("search the web for latest AI research papers", ["collect"]),
+        ("design a minimalist poster with philosophy", ["image"]),
+        ("plan a multi step implementation task", ["plan"]),
+        ("find and install a skill from skillhub", ["collect"]),
+    ]
+    for text, want in cases:
+        got = parsed_types(text)
+        check(f"R1 single-intent {text!r}", got, want)
+        check(f"R1 not multi {text!r}", len(got) >= 2, False)
+    # 真多意图不受影响（成对动作词合并只针对获取技能语境）
+    s = intent.parse("write a toutiao article and also draw a diagram for it")
+    check("R1 real multi still detected", len(s["sub_tasks"]) >= 2, True)
+    s2 = intent.parse("research online then write a wechat article")
+    check("R1 research+write still detected", len(s2["sub_tasks"]) >= 2, True)
+
+
 if __name__ == "__main__":
     test_action_vocab()
     test_parse_workflow()
@@ -279,6 +299,7 @@ if __name__ == "__main__":
     test_build_interactive()
     test_feedback_skill_pick()
     test_error_hints()
+    test_rule_engine_regressions()
     print("\nWORKFLOW NLP TESTS: PASS" if not FAILED
           else f"\nWORKFLOW NLP TESTS: {len(FAILED)} FAILED -> {FAILED}")
     raise SystemExit(1 if FAILED else 0)

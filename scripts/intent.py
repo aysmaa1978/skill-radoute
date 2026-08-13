@@ -151,12 +151,33 @@ TEMPLATE_TARGET = {
 }
 
 
+_KW_CACHE: dict = {}
+
+
+def _kw_matches(kw: str, low: str) -> bool:
+    """关键词匹配：ASCII 词用整词（词边界）匹配，中文用子串匹配。
+
+    v3.0.1 修复（规则引擎报告 #R1）：英文关键词此前按子串匹配，导致
+    "test" 命中 "latest"、"post" 命中 "poster"、"implement" 命中
+    "implementation" 等假阳性，单意图查询被误拆为多意图。
+    """
+    if not kw:
+        return False
+    if kw.isascii():
+        rx = _KW_CACHE.get(kw)
+        if rx is None:
+            rx = re.compile(rf"(?<![a-z0-9]){re.escape(kw.lower())}(?![a-z0-9])")
+            _KW_CACHE[kw] = rx
+        return rx.search(low) is not None
+    return kw.lower() in low
+
+
 def _matched_types(text: str):
     low = text.lower()
     hits = []
     for t, kws in TYPE_PATTERNS.items():
         for kw in kws:
-            if kw.lower() in low:
+            if _kw_matches(kw, low):
                 hits.append(t)
                 break
     return [t for t in TYPE_ORDER if t in hits]
@@ -202,8 +223,18 @@ def _intent_label(types: list):
 
 def parse(text: str) -> dict:
     """解析自然语言为结构化规格。v2.0 起附带 parallelizable / parallel_groups：
-    多子任务时按依赖图分层，无依赖即可并行（供 route --parallel 与工作流引擎消费）。"""
+    多子任务时按依赖图分层，无依赖即可并行（供 route --parallel 与工作流引擎消费）。
+
+    v3.0.1 修复（规则引擎报告 #R1）：
+      - 英文关键词整词匹配（消除 test/latest、post/poster、implement/implementation 子串假阳性）
+      - 「find/install/下载/安装 + 技能/skill」视为单一获取目标（成对动作词合并），
+        不再误拆为多意图。
+    """
     types = _matched_types(text)
+    # 成对动作词合并：查找/安装一个技能 = 单一获取目标（acquire）
+    if set(types) == {"collect", "install"} and re.search(
+            r"技能|skill|skillhub|插件|plugin", text, re.IGNORECASE):
+        types = ["collect"]
     sub_tasks = [{"type": t, "target": TEMPLATE_TARGET[t]} for t in types]
     domain = _domain(text)
     suggested = []

@@ -37,7 +37,7 @@ AUTO_THRESHOLD = 1.2   # top1 score must clear this to auto-execute
 AUTO_MARGIN = 1.30     # top1 must beat top2 by this ratio
 CALL_STATES = ("open", "suspended", "ok", "failed", "partial", "skipped")
 
-__version__ = "3.0.0"  # skill-radoute v3.0.0（自然语言解析引擎 + 交互式工作流构建）
+__version__ = "3.0.1"  # skill-radoute v3.0.1（规则引擎 #R1 修复：intent 单意图误拆）
 
 # ----------------------------------------------------------------- route cache
 # v1.8 路由决策缓存：相同查询 + 技能集版本未变 -> 直接复用打分结果，跳过
