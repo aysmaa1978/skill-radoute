@@ -17,6 +17,9 @@ import argparse, hashlib, os, shutil, sys
 EXCLUDE_DIRS = {".git", "__pycache__", ".workbuddy"}
 EXCLUDE_FILES = {".DS_Store"}
 EXCLUDE_SUFFIX = (".pyc", ".zip", ".skill")
+# .bat：SkillHub 提交不允许该文件类型。quickstart.bat 保留在 git 仓库供开发者
+# 使用，但不复制进 SkillHub 安装副本；已存在的旧 .bat 副本由 --prune 清理。
+COPY_EXCLUDE_SUFFIX = (".bat",)
 
 
 def sha256(path):
@@ -32,7 +35,8 @@ def walk(root):
     for dp, dn, fn in os.walk(root):
         dn[:] = [d for d in dn if d not in EXCLUDE_DIRS and not d.startswith(".")]
         for f in fn:
-            if f in EXCLUDE_FILES or f.endswith(EXCLUDE_SUFFIX):
+            if f in EXCLUDE_FILES or f.endswith(EXCLUDE_SUFFIX) \
+                    or f.endswith(COPY_EXCLUDE_SUFFIX):
                 continue
             yield os.path.join(dp, f)
 
